@@ -12,7 +12,15 @@ const PORT = process.env.PORT || 3000;
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
-const JOBS_PATH   = path.join(__dirname, 'jobs.json');
+const JOBS_PATH = process.env.RAILWAY_ENVIRONMENT
+  ? '/data/jobs.json'
+  : path.join(__dirname, 'jobs.json');
+
+// Si estamos en Railway y el archivo no existe aún, copiamos el default del repo
+if (process.env.RAILWAY_ENVIRONMENT && !fs.existsSync(JOBS_PATH)) {
+  fs.mkdirSync('/data', { recursive: true });
+  fs.copyFileSync(path.join(__dirname, 'jobs.json'), JOBS_PATH);
+}
 const LOGS_DIR    = path.join(__dirname, 'logs');
 const SCRIPTS_DIR = path.join(__dirname, 'scripts');
 if (!fs.existsSync(LOGS_DIR))    fs.mkdirSync(LOGS_DIR,    { recursive: true });
