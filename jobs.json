@@ -1,0 +1,26 @@
+[
+  {
+    "id": "asistencia-powerbi",
+    "name": "Descarga Asistencia Power BI",
+    "description": "Descarga reporte de asistencia desde Power BI y lo envía por email",
+    "script": "./scripts/descarga-asistencia-cloud.js",
+    "cron": "0 11,15,20 * * 1-5",
+    "enabled": true,
+    "notify": {
+      "on": "never",
+      "email": ""
+    }
+  },
+  {
+    "id": "mainasss-1780880201870",
+    "name": "Descarga Proyectos Api Geovictoia",
+    "description": "",
+    "script": "./scripts/main.py",
+    "cron": "",
+    "enabled": true,
+    "notify": {
+      "on": "never",
+      "email": ""
+    }
+  }
+]

@@ -1,0 +1,16 @@
+# Dependencias
+node_modules/
+
+# Variables de entorno (secretos)
+.env
+
+# Logs
+logs/
+*.log
+
+# Sistema operativo
+.DS_Store
+Thumbs.db
+
+# Puppeteer cache
+.cache/
