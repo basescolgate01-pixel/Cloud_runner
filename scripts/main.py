@@ -12,7 +12,7 @@ sys.stdout.reconfigure(encoding='utf-8')
 
 import requests
 from requests_oauthlib import OAuth1
-import csv, os, io, smtplib
+import csv, os, io, base64
 from datetime import datetime, date, timezone, timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -32,10 +32,12 @@ URL_ACTIVITIES  = "https://apiv3.geovictoria.com/api/Activity/GetActivities"
 URL_PROJECTS    = "https://apiv3.geovictoria.com/api/Project/List"
 TAM_LOTE        = 150
 
-# EMAIL
-EMAIL_REMITENTE    = "basescolgate01@gmail.com"
-EMAIL_CONTRASENA   = "hhdwtcolvnbcrvcm"        # Contraseña de aplicación Gmail (sin espacios)
-EMAIL_DESTINATARIO = "mriquelme@ecrgroup.cl"
+# EMAIL (Gmail API via OAuth2 — variables de entorno en Railway)
+EMAIL_REMITENTE    = os.environ.get("GMAIL_USER", "notificaciones.colgate@gmail.com")
+EMAIL_DESTINATARIO = os.environ.get("EMAIL_DESTINO", "mriquelme@ecrgroup.cl")
+GMAIL_CLIENT_ID     = os.environ.get("GMAIL_CLIENT_ID", "")
+GMAIL_CLIENT_SECRET = os.environ.get("GMAIL_CLIENT_SECRET", "")
+GMAIL_REFRESH_TOKEN = os.environ.get("GMAIL_REFRESH_TOKEN", "")
 # ============================================================
 
 HOY         = datetime.now(CHILE_TZ).date()
@@ -211,12 +213,24 @@ Este correo fue generado automáticamente.
     adjunto.add_header("Content-Disposition", f"attachment; filename={nombre_archivo}")
     msg.attach(adjunto)
 
-    # Enviar via Gmail SMTP
-    with smtplib.SMTP("smtp.gmail.com", 587) as servidor:
-        servidor.starttls()
-        servidor.login(EMAIL_REMITENTE, EMAIL_CONTRASENA)
-        servidor.sendmail(EMAIL_REMITENTE, EMAIL_DESTINATARIO, msg.as_string())
+    # Obtener access token via OAuth2 refresh token
+    token_resp = requests.post("https://oauth2.googleapis.com/token", data={
+        "client_id":     GMAIL_CLIENT_ID,
+        "client_secret": GMAIL_CLIENT_SECRET,
+        "refresh_token": GMAIL_REFRESH_TOKEN,
+        "grant_type":    "refresh_token",
+    })
+    token_resp.raise_for_status()
+    access_token = token_resp.json()["access_token"]
 
+    # Enviar via Gmail API
+    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+    gmail_resp = requests.post(
+        f"https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
+        headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+        json={"raw": raw},
+    )
+    gmail_resp.raise_for_status()
     print(f"  ✓ Email enviado a {EMAIL_DESTINATARIO}")
 
 
