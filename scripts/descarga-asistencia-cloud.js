@@ -8,10 +8,10 @@
  */
 
 const puppeteer = require('puppeteer');
-const nodemailer = require('nodemailer');
 const path = require('path');
 const fs = require('fs');
 const http = require('http');
+const https = require('https');
 
 // ─── CONFIGURACIÓN ────────────────────────────────────────────────────────────
 const CONFIG = {
@@ -28,9 +28,11 @@ const CONFIG = {
   // Email de destino
   emailDestino: process.env.EMAIL_DESTINO || 'mriquelme@ecrgroup.cl',
 
-  // Gmail remitente — usar App Password, no la contraseña normal
-  gmailUser:    process.env.GMAIL_USER     || 'basescolgate01@gmail.com',
-  gmailPass:    process.env.GMAIL_APP_PASS || 'hipuxekkzmxxafbp',
+  // Gmail remitente — OAuth2
+  gmailUser:          process.env.GMAIL_USER          || 'notificaciones.colgate@gmail.com',
+  gmailClientId:      process.env.GMAIL_CLIENT_ID     || '',
+  gmailClientSecret:  process.env.GMAIL_CLIENT_SECRET || '',
+  gmailRefreshToken:  process.env.GMAIL_REFRESH_TOKEN || '',
 
   // Puerto del servidor HTTP
   port: parseInt(process.env.PORT || '8080'),
@@ -327,27 +329,64 @@ async function exportarTabla(page) {
   }
 }
 
-// ─── ENVIAR EMAIL ─────────────────────────────────────────────────────────────
+// ─── ENVIAR EMAIL (Gmail API + OAuth2) ───────────────────────────────────────
 async function enviarEmail(archivoPath, fecha) {
   console.log(`\n📧 Enviando email a ${CONFIG.emailDestino}...`);
 
-  const transporter = nodemailer.createTransport({
-    service: 'gmail',
-    auth: { user: CONFIG.gmailUser, pass: CONFIG.gmailPass },
+  // 1. Obtener access token
+  const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      client_id:     CONFIG.gmailClientId,
+      client_secret: CONFIG.gmailClientSecret,
+      refresh_token: CONFIG.gmailRefreshToken,
+      grant_type:    'refresh_token',
+    }),
   });
+  if (!tokenRes.ok) throw new Error(`Token error: ${await tokenRes.text()}`);
+  const { access_token } = await tokenRes.json();
 
-  await transporter.sendMail({
-    from: `"Asistencia Power BI" <${CONFIG.gmailUser}>`,
-    to: CONFIG.emailDestino,
-    subject: `Asistencia Google_CO ${fecha}`,
-    text: `Adjunto el reporte de asistencia del ${fecha}.`,
-    attachments: [
-      { filename: path.basename(archivoPath), path: archivoPath },
-      ...(fs.existsSync(path.join(CONFIG.downloadPath, 'debug-fecha.png'))
-        ? [{ filename: 'debug-fecha.png', path: path.join(CONFIG.downloadPath, 'debug-fecha.png') }]
-        : []),
-    ],
+  // 2. Construir MIME manualmente
+  const boundary = 'boundary_' + Date.now();
+  const fileBytes = fs.readFileSync(archivoPath);
+  const fileB64   = fileBytes.toString('base64');
+  const filename  = path.basename(archivoPath);
+
+  const mime = [
+    `MIME-Version: 1.0`,
+    `From: "Asistencia Power BI" <${CONFIG.gmailUser}>`,
+    `To: ${CONFIG.emailDestino}`,
+    `Subject: Asistencia Google_CO ${fecha}`,
+    `Content-Type: multipart/mixed; boundary="${boundary}"`,
+    ``,
+    `--${boundary}`,
+    `Content-Type: text/plain; charset="utf-8"`,
+    ``,
+    `Adjunto el reporte de asistencia del ${fecha}.`,
+    ``,
+    `--${boundary}`,
+    `Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`,
+    `Content-Transfer-Encoding: base64`,
+    `Content-Disposition: attachment; filename="${filename}"`,
+    ``,
+    fileB64,
+    `--${boundary}--`,
+  ].join('\r\n');
+
+  const raw = Buffer.from(mime).toString('base64')
+    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+  // 3. Enviar via Gmail API
+  const sendRes = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${access_token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ raw }),
   });
+  if (!sendRes.ok) throw new Error(`Gmail API error: ${await sendRes.text()}`);
 
   console.log('  ✅ Email enviado');
 }
