@@ -212,7 +212,8 @@ Este correo fue generado automáticamente.
     msg.attach(adjunto)
 
     # Enviar via Gmail SMTP
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as servidor:
+    with smtplib.SMTP("smtp.gmail.com", 587) as servidor:
+        servidor.starttls()
         servidor.login(EMAIL_REMITENTE, EMAIL_CONTRASENA)
         servidor.sendmail(EMAIL_REMITENTE, EMAIL_DESTINATARIO, msg.as_string())
 
