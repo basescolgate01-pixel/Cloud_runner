@@ -510,7 +510,7 @@ async function descargarAsistencia() {
 // Si RAILWAY_ENVIRONMENT o HTTP_MODE están seteados → servidor HTTP (Railway/Cloud Run)
 // Si no → corre directamente y sale (runner local / cron)
 
-const HTTP_MODE = process.env.RAILWAY_ENVIRONMENT || process.env.HTTP_MODE;
+const HTTP_MODE = process.env.HTTP_MODE; // HTTP_MODE debe setearse explícitamente; RAILWAY_ENVIRONMENT solo no activa el servidor
 
 if (!HTTP_MODE) {
   // ── Modo directo (runner local) ──────────────────────────────────────────
