@@ -167,23 +167,36 @@ async function setearFecha(page, fecha) {
   // Tipeamos directamente en el input en lugar de navegar el calendario: el
   // tipeo no depende del idioma de la UI (el reporte está en español) ni de
   // dónde quede el foco del calendario, así que es confiable en headless.
+  //
+  // IMPORTANTE: Power BI re-renderiza el panel de filtros después de cada
+  // cambio de fecha, lo que deja los ElementHandle previos inválidos (stale).
+  // Por eso re-buscamos los inputs ANTES de cada campo individual.
   console.log(`  Seteando fecha: ${fecha}`);
-  const { contexto, inputs } = await buscarInputsFecha(page);
-  if (inputs.length === 0) throw new Error('No se encontraron inputs de fecha');
 
-  const inputsConPos = [];
-  for (const inp of inputs) {
-    const x = await contexto.evaluate(el => el.getBoundingClientRect().x, inp);
-    inputsConPos.push({ inp, x });
-  }
-  inputsConPos.sort((a, b) => a.x - b.x);
+  // Orden: HASTA primero (idx 1 por posición X), luego DESDE (idx 0)
+  const labelsOrden = ['HASTA', 'DESDE'];
 
-  // Llenar HASTA primero (índice 1), luego DESDE (índice 0)
-  const orden = inputsConPos.length >= 2
-    ? [{ inp: inputsConPos[1].inp, label: 'HASTA' }, { inp: inputsConPos[0].inp, label: 'DESDE' }]
-    : inputsConPos.map((o, i) => ({ inp: o.inp, label: i === 0 ? 'DESDE' : 'HASTA' }));
+  for (const label of labelsOrden) {
+    console.log(`  → Buscando inputs para ${label}...`);
 
-  for (const { inp, label } of orden) {
+    // Re-buscar los inputs frescos antes de cada campo (evita stale handles)
+    const { contexto, inputs } = await buscarInputsFecha(page);
+    if (inputs.length === 0) throw new Error('No se encontraron inputs de fecha');
+
+    const inputsConPos = [];
+    for (const inp of inputs) {
+      try {
+        const x = await contexto.evaluate(el => el.getBoundingClientRect().x, inp);
+        inputsConPos.push({ inp, x });
+      } catch (_) {}
+    }
+    if (inputsConPos.length === 0) throw new Error('Inputs inaccesibles (stale)');
+    inputsConPos.sort((a, b) => a.x - b.x);
+
+    // HASTA = índice 1 (derecha), DESDE = índice 0 (izquierda)
+    const idx = label === 'HASTA' ? Math.min(1, inputsConPos.length - 1) : 0;
+    const inp = inputsConPos[idx].inp;
+
     console.log(`  → Seteando ${label} a ${fecha}...`);
     try {
       // 1. Enfocar
@@ -198,7 +211,7 @@ async function setearFecha(page, fecha) {
           el.dispatchEvent(new Event('input', { bubbles: true }));
           el.dispatchEvent(new Event('change', { bubbles: true }));
         }, inp),
-        sleep(10000), // máx 10s para esta operación
+        sleep(5000),
       ]);
       await sleep(200);
 
@@ -208,8 +221,11 @@ async function setearFecha(page, fecha) {
       await contexto.keyboard.press('Backspace');
       await sleep(200);
 
-      // 4. Tipear la fecha carácter por carácter
-      await inp.type(fecha, { delay: 80 });
+      // 4. Tipear la fecha carácter por carácter (con timeout de 30s)
+      await Promise.race([
+        inp.type(fecha, { delay: 80 }),
+        sleep(30000).then(() => { throw new Error('Timeout al tipear fecha'); }),
+      ]);
       await sleep(500);
 
       // 5. Disparar eventos de cambio
@@ -220,7 +236,7 @@ async function setearFecha(page, fecha) {
           el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
           el.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', bubbles: true }));
         }, inp),
-        sleep(10000), // máx 10s para esta operación
+        sleep(5000),
       ]);
       await sleep(400);
 
@@ -228,9 +244,15 @@ async function setearFecha(page, fecha) {
       await contexto.keyboard.press('Enter');
       await sleep(400);
       await contexto.keyboard.press('Tab');
-      await sleep(1000);
 
-      const val = await contexto.evaluate(el => el.value, inp);
+      // Esperar más después de HASTA para que Power BI termine de re-renderizar
+      const pausaPost = label === 'HASTA' ? 3000 : 1000;
+      await sleep(pausaPost);
+
+      const val = await Promise.race([
+        contexto.evaluate(el => el.value, inp),
+        sleep(5000).then(() => '(timeout)'),
+      ]);
       console.log(`  ✅ ${label} = "${val}"`);
     } catch (e) {
       console.log(`  ⚠️ Error en ${label}: ${e.message}`);
@@ -415,6 +437,23 @@ async function enviarEmail(archivoPath, fecha) {
   console.log('  ✅ Email enviado');
 }
 
+// ─── LIMPIEZA AL DETENER ──────────────────────────────────────────────────────
+// Cuando server.js detiene el job manda SIGTERM primero (3s) y luego SIGKILL.
+// Capturamos SIGTERM para cerrar el browser de Chromium limpiamente antes de morir,
+// evitando que queden procesos zombie en Railway.
+let _browserActivo = null; // referencia global al browser en curso
+
+process.on('SIGTERM', async () => {
+  console.log('\n⏹  SIGTERM recibido — cerrando Chromium...');
+  try {
+    if (_browserActivo) await _browserActivo.close();
+    console.log('  ✅ Chromium cerrado');
+  } catch (e) {
+    console.log(`  ⚠️  Error al cerrar Chromium: ${e.message}`);
+  }
+  process.exit(0);
+});
+
 // ─── FUNCIÓN PRINCIPAL ────────────────────────────────────────────────────────
 async function descargarAsistencia() {
   const fecha = getFechaActual();
@@ -458,6 +497,7 @@ async function descargarAsistencia() {
       defaultViewport: { width: 1920, height: 1080 },
     });
 
+    _browserActivo = browser; // exponer al handler SIGTERM
     const page = await browser.newPage();
     await page.evaluateOnNewDocument(() => {
       Object.defineProperty(navigator, 'webdriver', { get: () => false });
@@ -629,6 +669,7 @@ async function descargarAsistencia() {
     return { ok: false, error: err.message };
   } finally {
     if (browser) { await sleep(1000); await browser.close(); }
+    _browserActivo = null;
   }
 }
 
