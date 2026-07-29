@@ -531,15 +531,19 @@ async function descargarAsistencia() {
     if (!url.includes('app.powerbi.com/groups')) {
       console.log('📍 Navegando al reporte...');
       await page.goto(CONFIG.powerBiUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
-      await sleep(3000);
+      await sleep(5000);
+      url = page.url();
+      console.log(`  URL tras goto reporte: ${url}`);
     }
 
-    // Esperar reporte
+    // Esperar reporte — puede redirigir a singleSignOn y luego al reporte
     console.log('\n⏳ Esperando reporte...');
     await page.waitForFunction(
       () => window.location.href.includes('app.powerbi.com/groups'),
-      { timeout: 60000 }
+      { timeout: 120000 }
     );
+    url = page.url();
+    console.log(`  URL reporte: ${url}`);
     await sleep(25000); // Power BI tarda más en renderizar en headless (25s para notebooks lentos)
     console.log('✅ Reporte cargado');
 
