@@ -487,56 +487,77 @@ async function descargarAsistencia() {
       if (evt.state === 'canceled')  { downloadInfo.error = true; downloadInfo.done = true; console.log('  ❌ Descarga cancelada'); }
     });
 
-    // Ir directo al login de Microsoft (evita el SSO automático que se cuelga)
-    console.log('📍 Navegando al login de Microsoft...');
-    const loginUrl = `https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=871c010f-5e61-4fb1-83ac-98610a7e9110&response_type=code&redirect_uri=https://app.powerbi.com/signin/index.html&scope=openid&login_hint=${encodeURIComponent(CONFIG.pbiEmail)}`;
-    await page.goto(loginUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    // Navegar al reporte — Power BI redirige a singleSignOn, que luego redirige a Microsoft login
+    console.log('📍 Navegando a Power BI...');
+    await page.goto(CONFIG.powerBiUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
     await sleep(3000);
     let url = page.url();
-    console.log(`  URL: ${url}`);
+    console.log(`  URL inicial: ${url}`);
 
-    // Login
+    // Si está en singleSignOn, completar el formulario de email de Power BI
+    if (url.includes('singleSignOn')) {
+      console.log('  Formulario de email Power BI detectado...');
+      await page.waitForNetworkIdle({ idleTime: 1500, timeout: 10000 }).catch(() => {});
+
+      // Buscar cualquier input de email o texto
+      const inputSelector = 'input[type="email"], input[type="text"], input[name="email"], input';
+      await page.waitForSelector(inputSelector, { visible: true, timeout: 15000 });
+      const emailInput = await page.$(inputSelector);
+      await emailInput.click({ clickCount: 3 });
+      await emailInput.type(CONFIG.pbiEmail, { delay: 80 });
+      console.log('  ✅ Email ingresado');
+
+      // Click en "Enviar" / "Submit"
+      const enviado = await page.evaluate(() => {
+        const btn = Array.from(document.querySelectorAll('button, input[type="submit"]'))
+          .find(b => b.textContent.trim().match(/enviar|submit|next|siguiente/i) || b.type === 'submit');
+        if (btn) { btn.click(); return btn.textContent.trim() || 'submit'; }
+        return null;
+      });
+      if (enviado) {
+        console.log(`  ✅ Botón "${enviado}" clickeado`);
+      } else {
+        await page.keyboard.press('Enter');
+        console.log('  ✅ Enter presionado');
+      }
+
+      // Esperar redirect a Microsoft login
+      await page.waitForFunction(
+        () => window.location.href.includes('microsoftonline') || window.location.href.includes('login.microsoft') || window.location.href.includes('app.powerbi.com/groups'),
+        { timeout: 30000 }
+      );
+      url = page.url();
+      console.log(`  URL tras singleSignOn: ${url}`);
+    }
+
+    // Login Microsoft
     console.log('\n🔑 Login...');
 
-    // Pantalla pick-account (varias cuentas)
-    if (url.includes('microsoftonline') && await page.$('[data-test-id="tiles-user-row"], div[role="option"]').catch(() => null)) {
-      console.log('  Pick-account detectado...');
-      const clickeado = await page.evaluate((email) => {
-        const els = Array.from(document.querySelectorAll('[data-test-id="tiles-user-row"], div[role="option"]'));
-        const match = els.find(e => e.textContent.includes(email));
-        if (match) { match.click(); return true; }
-        return false;
-      }, CONFIG.pbiEmail);
-      console.log(clickeado ? '  ✅ Cuenta seleccionada' : '  ⚠ No se encontró la cuenta');
-      await sleep(3000); url = page.url();
-    }
-
-    // Pantalla de email
     if (url.includes('microsoftonline') || url.includes('login.microsoft')) {
+      // Email
       const tieneEmail = await page.$('input[name="loginfmt"], input[type="email"]').catch(() => null);
-      if (tieneEmail) { await loginPowerBI(page); await sleep(3000); url = page.url(); }
+      if (tieneEmail) {
+        await loginPowerBI(page);
+        await sleep(3000);
+        url = page.url();
+      }
+
+      // Contraseña
+      if (url.includes('microsoftonline') || url.includes('login.microsoft')) {
+        await loginMicrosoft(page);
+        await sleep(3000);
+        url = page.url();
+      }
+
+      // KMSI
+      if (url.includes('microsoftonline') || url.includes('login.microsoft')) {
+        await manejarKMSI(page);
+        await sleep(3000);
+        url = page.url();
+      }
     }
 
-    // Pantalla de contraseña
-    if (url.includes('microsoftonline') || url.includes('login.microsoft')) {
-      await loginMicrosoft(page); await sleep(3000); url = page.url();
-    }
-
-    // KMSI
-    if (url.includes('microsoftonline') || url.includes('login.microsoft')) {
-      await manejarKMSI(page); await sleep(3000); url = page.url();
-    }
-
-    // Si aún no llegamos al reporte, navegar a él
-    if (!url.includes('app.powerbi.com/groups')) {
-      console.log('📍 Navegando al reporte...');
-      await page.goto(CONFIG.powerBiUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
-      await sleep(5000);
-      url = page.url();
-      console.log(`  URL tras goto reporte: ${url}`);
-    }
-
-    // Esperar reporte — puede redirigir a singleSignOn y luego al reporte
+    // Esperar que Power BI cargue el reporte (singleSignOn se auto-completa tras el login)
     console.log('\n⏳ Esperando reporte...');
     await page.waitForFunction(
       () => window.location.href.includes('app.powerbi.com/groups'),
