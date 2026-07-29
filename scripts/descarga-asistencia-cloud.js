@@ -71,8 +71,26 @@ function getFechaFiltro() {
 // ─── LOGIN POWER BI ───────────────────────────────────────────────────────────
 async function loginPowerBI(page) {
   console.log('  [1] Pantalla Power BI login...');
-  await page.waitForSelector('input[type="email"], input[placeholder="Enter email"]', { visible: true, timeout: 20000 });
-  const input = await page.$('input[type="email"]') || await page.$('input[placeholder="Enter email"]');
+  console.log(`  URL actual: ${page.url()}`);
+  const screenshotPath = process.env.RAILWAY_ENVIRONMENT ? '/data/debug-login.png' : '/tmp/debug-login.png';
+  await page.screenshot({ path: screenshotPath }).catch(() => {});
+  console.log(`  Screenshot guardado en ${screenshotPath}`);
+
+  // Manejar pantalla "elegir cuenta" de Microsoft si aparece
+  const pickAccount = await page.$('div[data-focuszone-id], div[class*="tile"]').catch(() => null);
+  if (pickAccount) {
+    console.log('  Pantalla "elegir cuenta" detectada, buscando cuenta...');
+    const cuenta = await page.evaluate((email) => {
+      const tiles = Array.from(document.querySelectorAll('[data-test-id="tiles-user-row"], div[class*="account"], div[tabindex]'));
+      const match = tiles.find(t => t.textContent.includes(email));
+      if (match) { match.click(); return true; }
+      return false;
+    }, CONFIG.pbiEmail);
+    if (cuenta) { await sleep(3000); return; }
+  }
+
+  await page.waitForSelector('input[type="email"], input[placeholder="Enter email"], input[name="loginfmt"]', { visible: true, timeout: 40000 });
+  const input = await page.$('input[type="email"]') || await page.$('input[placeholder="Enter email"]') || await page.$('input[name="loginfmt"]');
   await input.click({ clickCount: 3 });
   await input.type(CONFIG.pbiEmail, { delay: 80 });
   await sleep(500);
@@ -173,12 +191,15 @@ async function setearFecha(page, fecha) {
       await sleep(300);
 
       // 2. Limpiar el campo con el setter nativo (lo detecta React/Angular)
-      await contexto.evaluate(el => {
-        const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-        nativeSetter.call(el, '');
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-        el.dispatchEvent(new Event('change', { bubbles: true }));
-      }, inp);
+      await Promise.race([
+        contexto.evaluate(el => {
+          const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+          nativeSetter.call(el, '');
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+        }, inp),
+        sleep(10000), // máx 10s para esta operación
+      ]);
       await sleep(200);
 
       // 3. Seleccionar todo + borrar (doble seguro)
@@ -192,12 +213,15 @@ async function setearFecha(page, fecha) {
       await sleep(500);
 
       // 5. Disparar eventos de cambio
-      await contexto.evaluate(el => {
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-        el.dispatchEvent(new Event('change', { bubbles: true }));
-        el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
-        el.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', bubbles: true }));
-      }, inp);
+      await Promise.race([
+        contexto.evaluate(el => {
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+          el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+          el.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', bubbles: true }));
+        }, inp),
+        sleep(10000), // máx 10s para esta operación
+      ]);
       await sleep(400);
 
       // 6. Enter + Tab para confirmar y cerrar el calendario
@@ -410,15 +434,25 @@ async function descargarAsistencia() {
     browser = await puppeteer.launch({
       headless: 'new',
       slowMo: 30,
+      protocolTimeout: 300000,
+      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
         '--disable-gpu',
+        '--no-zygote',
         '--window-size=1920,1080',
         '--disable-blink-features=AutomationControlled',
         '--lang=es-CL',
         '--accept-lang=es-CL,es,en',
+        '--disable-extensions',
+        '--disable-background-networking',
+        '--disable-default-apps',
+        '--disable-sync',
+        '--disable-translate',
+        '--hide-scrollbars',
+        '--mute-audio',
       ],
       env: { ...process.env, LANG: 'es_CL.UTF-8', LANGUAGE: 'es_CL:es' },
       defaultViewport: { width: 1920, height: 1080 },
@@ -453,23 +487,51 @@ async function descargarAsistencia() {
       if (evt.state === 'canceled')  { downloadInfo.error = true; downloadInfo.done = true; console.log('  ❌ Descarga cancelada'); }
     });
 
-    // Navegar
-    console.log('📍 Navegando a Power BI...');
-    await page.goto(CONFIG.powerBiUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    // Ir directo al login de Microsoft (evita el SSO automático que se cuelga)
+    console.log('📍 Navegando al login de Microsoft...');
+    const loginUrl = `https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=871c010f-5e61-4fb1-83ac-98610a7e9110&response_type=code&redirect_uri=https://app.powerbi.com/signin/index.html&scope=openid&login_hint=${encodeURIComponent(CONFIG.pbiEmail)}`;
+    await page.goto(loginUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
     await sleep(3000);
-
     let url = page.url();
+    console.log(`  URL: ${url}`);
 
     // Login
     console.log('\n🔑 Login...');
-    if (url.includes('singleSignOn') || url.includes('powerbi.com/signin')) {
-      await loginPowerBI(page); await sleep(3000); url = page.url();
+
+    // Pantalla pick-account (varias cuentas)
+    if (url.includes('microsoftonline') && await page.$('[data-test-id="tiles-user-row"], div[role="option"]').catch(() => null)) {
+      console.log('  Pick-account detectado...');
+      const clickeado = await page.evaluate((email) => {
+        const els = Array.from(document.querySelectorAll('[data-test-id="tiles-user-row"], div[role="option"]'));
+        const match = els.find(e => e.textContent.includes(email));
+        if (match) { match.click(); return true; }
+        return false;
+      }, CONFIG.pbiEmail);
+      console.log(clickeado ? '  ✅ Cuenta seleccionada' : '  ⚠ No se encontró la cuenta');
+      await sleep(3000); url = page.url();
     }
+
+    // Pantalla de email
+    if (url.includes('microsoftonline') || url.includes('login.microsoft')) {
+      const tieneEmail = await page.$('input[name="loginfmt"], input[type="email"]').catch(() => null);
+      if (tieneEmail) { await loginPowerBI(page); await sleep(3000); url = page.url(); }
+    }
+
+    // Pantalla de contraseña
     if (url.includes('microsoftonline') || url.includes('login.microsoft')) {
       await loginMicrosoft(page); await sleep(3000); url = page.url();
     }
-    if (url.includes('login.microsoftonline') || url.includes('login.microsoft')) {
+
+    // KMSI
+    if (url.includes('microsoftonline') || url.includes('login.microsoft')) {
       await manejarKMSI(page); await sleep(3000); url = page.url();
+    }
+
+    // Si aún no llegamos al reporte, navegar a él
+    if (!url.includes('app.powerbi.com/groups')) {
+      console.log('📍 Navegando al reporte...');
+      await page.goto(CONFIG.powerBiUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+      await sleep(3000);
     }
 
     // Esperar reporte
@@ -478,7 +540,7 @@ async function descargarAsistencia() {
       () => window.location.href.includes('app.powerbi.com/groups'),
       { timeout: 60000 }
     );
-    await sleep(15000); // Power BI tarda más en renderizar en headless
+    await sleep(25000); // Power BI tarda más en renderizar en headless (25s para notebooks lentos)
     console.log('✅ Reporte cargado');
 
     // Fechas
