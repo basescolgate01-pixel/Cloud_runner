@@ -156,14 +156,17 @@ function runJob(id) {
 
   const cmd   = scriptPath.endsWith('.js') ? 'node' : (process.platform === 'win32' ? 'python' : 'python3');
   const child = spawn(cmd, [scriptPath], { env: { ...process.env }, cwd: path.dirname(scriptPath) });
+  job._child = child; // guardar referencia para poder detenerlo
 
   child.stdout.on('data', d => d.toString().split('\n').filter(l => l.trim()).forEach(addLog));
   child.stderr.on('data', d => d.toString().split('\n').filter(l => l.trim()).forEach(l => addLog(`⚠ ${l}`)));
 
   child.on('close', code => {
+    job._child = null;
     const duration    = Math.round((Date.now() - runStart) / 1000);
-    job.status        = code === 0 ? 'success' : 'error';
-    job.lastResult    = code === 0 ? 'Completado OK' : `Error (código ${code})`;
+    job.status        = code === 0 ? 'success' : (job._stopped ? 'idle' : 'error');
+    job.lastResult    = code === 0 ? 'Completado OK' : (job._stopped ? 'Detenido manualmente' : `Error (código ${code})`);
+    job._stopped      = false;
     job.lastDuration  = duration;
     job.runStart      = null;
 
@@ -203,6 +206,16 @@ app.get('/api/jobs', (_, res) =>
   }))));
 
 app.post('/api/jobs/:id/run', (req, res) => res.json(runJob(req.params.id)));
+
+app.post('/api/jobs/:id/stop', (req, res) => {
+  const job = state[req.params.id];
+  if (!job) return res.status(404).json({ error: 'Job no encontrado' });
+  if (job.status !== 'running' || !job._child) return res.json({ error: 'El job no está corriendo' });
+  job._stopped = true;
+  job._child.kill('SIGTERM');
+  setTimeout(() => { if (job._child) job._child.kill('SIGKILL'); }, 3000);
+  res.json({ ok: true });
+});
 
 app.get('/api/jobs/:id/logs', (req, res) => {
   const job = state[req.params.id];

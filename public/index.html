@@ -219,7 +219,7 @@ textarea.form-input { min-height: 60px; resize: vertical; }
 <header class="hdr">
   <span class="hdr-logo">☁️</span>
   <span class="hdr-title">Cloud Runner</span>
-  <span class="hdr-tag">LOCAL</span>
+  <span class="hdr-tag">PRO</span>
   <span class="hdr-clock" id="clock">--:--:--</span>
 </header>
 
@@ -445,6 +445,7 @@ function renderMain() {
             <div class="exec-top">
               <button class="btn btn-green" id="btn-run" onclick="triggerRun('${job.id}')" ${job.status==='running'?'disabled':''}>▶ Ejecutar ahora</button>
               <button class="btn btn-ghost" onclick="clearLogs()">🗑 Limpiar</button>
+              <button class="btn btn-danger" id="btn-stop" onclick="stopRun('${job.id}')" style="display:${job.status==='running'?'inline-flex':'none'}">⏹ Detener</button>
               <span class="exec-timer" id="exec-timer">0s</span>
               <span class="exec-status" id="exec-status"></span>
             </div>
@@ -736,6 +737,18 @@ async function triggerRun(id) {
 }
 function clearLogs() { const pre=document.getElementById('log-pre'); if(pre){pre.textContent='Logs limpiados.';pre.className='log-ph';} logOffset=0; }
 
+async function stopRun(id) {
+  const btn = document.getElementById('btn-stop');
+  if (btn) { btn.disabled = true; btn.textContent = '⏹ Deteniendo...'; }
+  try {
+    const r = await fetch(`/api/jobs/${id}/stop`, { method:'POST' });
+    const d = await r.json();
+    if (d.error) toast(d.error, 'err');
+    else toast('Ejecución detenida', 'ok');
+  } catch { toast('Error al detener', 'err'); }
+  finally { if(btn) { btn.disabled=false; btn.textContent='⏹ Detener'; } }
+}
+
 // ── Elapsed ───────────────────────────────────────────────────────────────────
 function startElapsedTimer(startDate) {
   clearInterval(elapsedTimer);
@@ -909,6 +922,7 @@ async function pollJobs() {
     const res=document.getElementById('m-result'); if(res){res.textContent=job.lastResult||'';res.style.color=resultColor(job.lastResult);}
     const dur=document.getElementById('m-dur'); if(dur)dur.textContent=job.lastDuration!=null?'⏱ '+fmtDur(job.lastDuration):'';
     const runBtn=document.getElementById('btn-run'); if(runBtn)runBtn.disabled=job.status==='running';
+    const stopBtn=document.getElementById('btn-stop'); if(stopBtn)stopBtn.style.display=job.status==='running'?'inline-flex':'none';
     if(job.status==='running'&&!elapsedTimer&&job.runStart)startElapsedTimer(new Date(job.runStart));
     else if(job.status!=='running'&&elapsedTimer)stopElapsedTimer();
     if(needsRerender){ renderMain(); logOffset = 0; pollLogs(selected); return; }
