@@ -182,42 +182,48 @@ async function setearFecha(page, fecha) {
   // Separado en 2 evaluate con sleep entre medio, porque setear HASTA
   // dispara un re-render síncrono en Power BI que puede bloquear el
   // evaluate >20s si ambos campos se hacen en la misma llamada.
+  // Cada campo se reintenta hasta 3 veces: en Railway el main thread del
+  // browser puede quedar bloqueado >60s renderizando y el evaluate se cuelga
+  // sin que Chrome esté muerto — esperar y reintentar suele funcionar.
+
+  async function setearCampo(nombre, idxExpr) {
+    let res = { ok: false, error: 'sin intentos' };
+    for (let intento = 1; intento <= 3; intento++) {
+      res = await conTimeout(page.evaluate(new Function('fecha', `
+        ${_fechaJS}
+        const f = _buscar();
+        if (!f) return { ok: false, error: 'No se encontraron inputs de fecha' };
+        const sorted = f.inputs.map(el => ({ el, x: el.getBoundingClientRect().x })).sort((a, b) => a.x - b.x);
+        const idx = ${idxExpr};
+        const val = _setear(sorted[idx].el, fecha);
+        return { ok: true, sel: f.sel, count: f.inputs.length, val };
+      `), fecha), 60000, `setear ${nombre}`).catch(e => ({ ok: false, error: e.message }));
+
+      if (res.ok) return res;
+      console.log(`  ⚠️ ${nombre} intento ${intento}/3: ${res.error}`);
+      await sleep(10000); // dar aire al browser antes de reintentar
+    }
+    return res;
+  }
 
   // ── HASTA (input derecho, idx 1) ──
-  const resHasta = await conTimeout(page.evaluate(new Function('fecha', `
-    ${_fechaJS}
-    const f = _buscar();
-    if (!f) return { ok: false, error: 'No se encontraron inputs de fecha' };
-    const sorted = f.inputs.map(el => ({ el, x: el.getBoundingClientRect().x })).sort((a, b) => a.x - b.x);
-    const idx = Math.min(1, sorted.length - 1);
-    const val = _setear(sorted[idx].el, fecha);
-    return { ok: true, sel: f.sel, count: f.inputs.length, val };
-  `), fecha), 30000, 'setear HASTA').catch(e => ({ ok: false, error: e.message }));
-
+  const resHasta = await setearCampo('HASTA', 'Math.min(1, sorted.length - 1)');
   if (resHasta.ok) {
     console.log(`  ✅ Inputs encontrados (${resHasta.sel}): ${resHasta.count}`);
     console.log(`  ✅ HASTA = "${resHasta.val}"`);
-  } else {
-    console.log(`  ⚠️ HASTA: ${resHasta.error}`);
   }
 
   // Esperar re-render de Power BI entre campos
   await sleep(6000);
 
   // ── DESDE (input izquierdo, idx 0) ──
-  const resDesde = await conTimeout(page.evaluate(new Function('fecha', `
-    ${_fechaJS}
-    const f = _buscar();
-    if (!f) return { ok: false, error: 'Inputs no encontrados tras HASTA' };
-    const sorted = f.inputs.map(el => ({ el, x: el.getBoundingClientRect().x })).sort((a, b) => a.x - b.x);
-    const val = _setear(sorted[0].el, fecha);
-    return { ok: true, val };
-  `), fecha), 30000, 'setear DESDE').catch(e => ({ ok: false, error: e.message }));
+  const resDesde = await setearCampo('DESDE', '0');
+  if (resDesde.ok) console.log(`  ✅ DESDE = "${resDesde.val}"`);
 
-  if (resDesde.ok) {
-    console.log(`  ✅ DESDE = "${resDesde.val}"`);
-  } else {
-    console.log(`  ⚠️ DESDE: ${resDesde.error}`);
+  // Si NINGÚN campo se pudo setear, no tiene sentido exportar (saldría con
+  // la fecha equivocada). Fallar acá para que el reintento del job actúe.
+  if (!resHasta.ok && !resDesde.ok) {
+    throw new Error(`No se pudo setear la fecha (${resHasta.error})`);
   }
 
   // Esperar a que Power BI aplique filtros y re-renderice la tabla
@@ -636,9 +642,10 @@ async function descargarAsistencia() {
     // Exportar
     console.log('\n📥 Exportando...');
     // Red de seguridad: si Chrome queda sin responder en CUALQUIER punto de
-    // exportarTabla (incluidos los movimientos de mouse, que no tienen timeout
-    // propio), esto corta a los 45s en vez de quedarse colgado para siempre.
-    await conTimeout(exportarTabla(page), 90000, 'exportarTabla (posible Chrome colgado)');
+    // exportarTabla, esto corta en vez de quedarse colgado para siempre.
+    // OJO: debe ser MAYOR que la suma de los reintentos internos de
+    // exportarTabla (paso 1 solo puede tomar 12×15s = 180s legítimamente).
+    await conTimeout(exportarTabla(page), 480000, 'exportarTabla (posible Chrome colgado)');
 
     // Esperar descarga: eventos CDP si el navegador los dispara, pero también
     // se revisa la carpeta directamente — en algunos entornos (Chromium del
@@ -702,6 +709,24 @@ async function descargarAsistencia() {
   }
 }
 
+// ─── REINTENTOS DEL JOB COMPLETO ──────────────────────────────────────────────
+// Si una corrida falla (Chrome colgado, Power BI lento, etc.), cerrar todo y
+// partir de cero suele resolverlo. 2 intentos en total.
+async function descargarConReintentos(maxIntentos = 2) {
+  let resultado = { ok: false, error: 'sin intentos' };
+  for (let i = 1; i <= maxIntentos; i++) {
+    if (i > 1) {
+      console.log(`\n🔁 Reintento ${i}/${maxIntentos} del job completo...`);
+      limpiarChromeHuerfano();
+      await sleep(5000);
+    }
+    resultado = await descargarAsistencia();
+    if (resultado.ok) return resultado;
+    console.log(`  ⚠️ Intento ${i}/${maxIntentos} falló: ${resultado.error}`);
+  }
+  return resultado;
+}
+
 // ─── MODO DE EJECUCIÓN ────────────────────────────────────────────────────────
 // Si RAILWAY_ENVIRONMENT o HTTP_MODE están seteados → servidor HTTP (Railway/Cloud Run)
 // Si no → corre directamente y sale (runner local / cron)
@@ -711,7 +736,7 @@ const HTTP_MODE = process.env.HTTP_MODE; // HTTP_MODE debe setearse explícitame
 if (!HTTP_MODE) {
   // ── Modo directo (runner local) ──────────────────────────────────────────
   console.log('🖥️  Modo: ejecución directa (sin servidor HTTP)');
-  descargarAsistencia().then(resultado => {
+  descargarConReintentos().then(resultado => {
     console.log('\n📦 Resultado:', JSON.stringify(resultado));
     process.exit(resultado.ok ? 0 : 1);
   }).catch(err => {
@@ -726,7 +751,7 @@ if (!HTTP_MODE) {
     if (req.method === 'POST' || req.method === 'GET') {
       console.log(`\n🚀 Tarea iniciada por ${req.method} ${req.url}`);
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      const resultado = await descargarAsistencia();
+      const resultado = await descargarConReintentos();
       res.end(JSON.stringify(resultado));
     } else {
       res.writeHead(405);
