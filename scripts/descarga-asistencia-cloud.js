@@ -245,43 +245,51 @@ async function exportarTabla(page) {
   ];
 
   // ── Paso 1: Encontrar el visual de la tabla y simular hover via JS ──
-  const tablaInfo = await conTimeout(page.evaluate(() => {
-    const claves = ['NOMBRE LOCAL', 'RUT PERSONA', 'NOMBRE CARGO'];
-    const fallback = ['NOMBRE LOCAL', 'NOMBRE PERSONA', 'NOMBRE PROVEEDOR'];
-    const todos = Array.from(document.querySelectorAll('div, section, article'));
+  // Reintentar porque después de cambiar fechas, Power BI re-renderiza la
+  // tabla y puede tardar bastante en una CPU lenta (Railway).
+  let tablaInfo = null;
+  for (let intento = 0; intento < 12; intento++) {
+    tablaInfo = await conTimeout(page.evaluate(() => {
+      const claves = ['NOMBRE LOCAL', 'RUT PERSONA', 'NOMBRE CARGO'];
+      const fallback = ['NOMBRE LOCAL', 'NOMBRE PERSONA', 'NOMBRE PROVEEDOR'];
+      const todos = Array.from(document.querySelectorAll('div, section, article'));
 
-    function buscar(textos, minY) {
-      let mejor = null;
-      for (const el of todos) {
-        const r = el.getBoundingClientRect();
-        if (r.width < 400 || r.height < 80 || r.y < minY) continue;
-        const txt = el.textContent || '';
-        const score = textos.filter(t => txt.includes(t)).length;
-        if (score >= 2 && (!mejor || r.width * r.height < mejor.area)) {
-          mejor = { el, x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height), area: r.width * r.height };
+      function buscar(textos, minY) {
+        let mejor = null;
+        for (const el of todos) {
+          const r = el.getBoundingClientRect();
+          if (r.width < 400 || r.height < 80 || r.y < minY) continue;
+          const txt = el.textContent || '';
+          const score = textos.filter(t => txt.includes(t)).length;
+          if (score >= 2 && (!mejor || r.width * r.height < mejor.area)) {
+            mejor = { el, x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height), area: r.width * r.height };
+          }
         }
+        return mejor;
       }
-      return mejor;
-    }
 
-    const visual = buscar(claves, 300) || buscar(fallback, 300);
-    if (!visual) return null;
+      const visual = buscar(claves, 300) || buscar(fallback, 300);
+      if (!visual) return null;
 
-    // Simular hover sobre el visual para que Power BI revele el botón "..."
-    const cx = visual.x + visual.w / 2;
-    const cyTop = visual.y + 10;
-    for (const evType of ['mouseenter', 'mouseover', 'mousemove']) {
-      visual.el.dispatchEvent(new MouseEvent(evType, {
-        bubbles: true, clientX: cx, clientY: cyTop, view: window,
+      // Simular hover sobre el visual para que Power BI revele el botón "..."
+      const cx = visual.x + visual.w / 2;
+      const cyTop = visual.y + 10;
+      for (const evType of ['mouseenter', 'mouseover', 'mousemove']) {
+        visual.el.dispatchEvent(new MouseEvent(evType, {
+          bubbles: true, clientX: cx, clientY: cyTop, view: window,
+        }));
+      }
+      visual.el.dispatchEvent(new MouseEvent('click', {
+        bubbles: true, clientX: cx, clientY: visual.y + visual.h / 2, view: window,
       }));
-    }
-    // También disparar click para dar foco al visual
-    visual.el.dispatchEvent(new MouseEvent('click', {
-      bubbles: true, clientX: cx, clientY: visual.y + visual.h / 2, view: window,
-    }));
 
-    return { x: visual.x, y: visual.y, w: visual.w, h: visual.h };
-  }), 15000, 'buscar visual de tabla');
+      return { x: visual.x, y: visual.y, w: visual.w, h: visual.h };
+    }), 10000, 'buscar visual de tabla').catch(() => null);
+
+    if (tablaInfo) break;
+    if (intento % 3 === 0) console.log(`  ⌛ Tabla no visible aún, reintento ${intento + 1}/12...`);
+    await sleep(5000);
+  }
 
   if (!tablaInfo) throw new Error('No se encontró la tabla de detalle en la página');
   console.log(`  ✅ Visual encontrado en (${tablaInfo.x}, ${tablaInfo.y}) ${tablaInfo.w}x${tablaInfo.h}`);
@@ -600,7 +608,8 @@ async function descargarAsistencia() {
     );
     url = page.url();
     console.log(`  URL reporte: ${url.split('?')[0]}`);
-    await sleep(25000); // Power BI tarda más en renderizar en headless (25s para notebooks lentos)
+    const esperaReporte = process.env.RAILWAY_ENVIRONMENT ? 40000 : 25000;
+    await sleep(esperaReporte); // Railway necesita más tiempo para renderizar Power BI
     console.log('✅ Reporte cargado');
 
     // Fechas
