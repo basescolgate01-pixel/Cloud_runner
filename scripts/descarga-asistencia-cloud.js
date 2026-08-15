@@ -74,9 +74,7 @@ function getFechaActual() {
 }
 
 function getFechaFiltro() {
-  // TEMPORAL: hardcodeada al 14 para pruebas (el 15 no tiene datos en el BI)
-  // TODO: volver a fecha dinámica cuando el BI esté actualizado
-  return '14-08-2026';
+  return getFechaActual(); // fecha de hoy en hora de Santiago
 }
 
 // ─── LOGIN POWER BI ───────────────────────────────────────────────────────────
@@ -178,6 +176,32 @@ const _fechaJS = `
 
 async function setearFecha(page, fecha) {
   console.log(`  Seteando fecha: ${fecha}`);
+
+  // Primero esperar a que los slicers de fecha estén presentes en el DOM.
+  // En Railway Power BI tarda mucho más en renderizar los visuals — intentar
+  // setear antes de que existan hace que el evaluate() se cuelgue.
+  console.log('  Esperando que los slicers de fecha aparezcan...');
+  const slicersOk = await conTimeout(
+    page.waitForFunction(() => {
+      const sels = [
+        'input.date-slicer-input',
+        'input[class*="date-slicer"]',
+        'input[class*="dateSlicer"]',
+        'input[type="text"][class*="slicer"]',
+      ];
+      for (const s of sels) {
+        if (document.querySelectorAll(s).length >= 2) return true;
+      }
+      return false;
+    }, { polling: 2000, timeout: 90000 }),
+    95000, 'esperar slicers de fecha'
+  ).then(() => true).catch(e => { console.log(`  ⚠️ Slicers no aparecieron: ${e.message}`); return false; });
+
+  if (!slicersOk) {
+    console.log('  ⚠️ Continuando sin setear fecha (slicers no encontrados)');
+    return;
+  }
+  console.log('  ✅ Slicers listos, seteando...');
 
   // Separado en 2 evaluate con sleep entre medio, porque setear HASTA
   // dispara un re-render síncrono en Power BI que puede bloquear el
@@ -735,7 +759,7 @@ async function descargarAsistencia() {
     );
     url = page.url();
     console.log(`  URL reporte: ${url.split('?')[0]}`);
-    const esperaReporte = process.env.RAILWAY_ENVIRONMENT ? 40000 : 25000;
+    const esperaReporte = process.env.RAILWAY_ENVIRONMENT ? 60000 : 25000;
     await sleep(esperaReporte); // Railway necesita más tiempo para renderizar Power BI
     console.log('✅ Reporte cargado');
 
