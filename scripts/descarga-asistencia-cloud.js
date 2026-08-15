@@ -100,8 +100,13 @@ async function loginPowerBI(page) {
 
   await page.waitForSelector('input[type="email"], input[placeholder="Enter email"], input[name="loginfmt"]', { visible: true, timeout: 40000 });
   const input = await page.$('input[type="email"]') || await page.$('input[placeholder="Enter email"]') || await page.$('input[name="loginfmt"]');
-  await input.click({ clickCount: 3 });
-  await input.type(CONFIG.pbiEmail, { delay: 80 });
+  await page.evaluate((el, val) => {
+    el.focus(); el.value = '';
+    const ns = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+    ns.call(el, val);
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  }, input, CONFIG.pbiEmail);
   await sleep(500);
   const enviado = await page.evaluate(() => {
     const btn = Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === 'Enviar' || b.textContent.trim() === 'Submit');
@@ -116,8 +121,13 @@ async function loginMicrosoft(page) {
   console.log('  [2] Pantalla Microsoft contraseña...');
   await page.waitForSelector('input[name="passwd"], input[type="password"]', { visible: true, timeout: 30000 });
   const pwd = await page.$('input[name="passwd"]') || await page.$('input[type="password"]');
-  await pwd.click({ clickCount: 3 });
-  await pwd.type(CONFIG.pbiPassword, { delay: 80 });
+  await page.evaluate((el, val) => {
+    el.focus(); el.value = '';
+    const ns = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+    ns.call(el, val);
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  }, pwd, CONFIG.pbiPassword);
   await sleep(500);
   const btn = await page.$('#idSIButton9') || await page.$('input[type="submit"]');
   if (btn) await btn.click(); else await page.keyboard.press('Enter');
@@ -208,64 +218,40 @@ async function setearFecha(page, fecha) {
 
     console.log(`  → Seteando ${label} a ${fecha}...`);
     try {
-      // 1. Enfocar
-      await inp.click();
-      await sleep(300);
+      // Todo via evaluate — sin inp.click(), inp.type(), keyboard.press()
+      // que se cuelgan en CPUs lentas de Railway.
+      await conTimeout(contexto.evaluate((el, val) => {
+        // Enfocar
+        el.focus();
+        el.click();
 
-      // 2. Limpiar el campo con el setter nativo (lo detecta React/Angular)
-      await Promise.race([
-        contexto.evaluate(el => {
-          const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-          nativeSetter.call(el, '');
-          el.dispatchEvent(new Event('input', { bubbles: true }));
-          el.dispatchEvent(new Event('change', { bubbles: true }));
-        }, inp),
-        sleep(5000),
-      ]);
-      await sleep(200);
+        // Limpiar + setear valor con setter nativo (React/Angular lo detecta)
+        const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+        nativeSetter.call(el, '');
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        nativeSetter.call(el, val);
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
 
-      // 3. Seleccionar todo + borrar (doble seguro)
-      await inp.click({ clickCount: 3 });
-      await sleep(200);
-      await contexto.keyboard.press('Backspace');
-      await sleep(200);
+        // Simular Enter para confirmar
+        el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
+        el.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
 
-      // 4. Tipear la fecha carácter por carácter (con timeout de 30s)
-      await Promise.race([
-        inp.type(fecha, { delay: 80 }),
-        sleep(30000).then(() => { throw new Error('Timeout al tipear fecha'); }),
-      ]);
-      await sleep(500);
+        // Quitar foco para cerrar calendario
+        el.blur();
+      }, inp, fecha), 10000, `setear valor ${label}`);
 
-      // 5. Disparar eventos de cambio
-      await Promise.race([
-        contexto.evaluate(el => {
-          el.dispatchEvent(new Event('input', { bubbles: true }));
-          el.dispatchEvent(new Event('change', { bubbles: true }));
-          el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
-          el.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', bubbles: true }));
-        }, inp),
-        sleep(5000),
-      ]);
-      await sleep(400);
-
-      // 6. Enter + Tab para confirmar y cerrar el calendario
-      await contexto.keyboard.press('Enter');
-      await sleep(400);
-      await contexto.keyboard.press('Tab');
-
-      // Esperar más después de HASTA para que Power BI termine de re-renderizar
-      const pausaPost = label === 'HASTA' ? 3000 : 1000;
+      // Esperar más después de HASTA para que Power BI re-renderice
+      const pausaPost = label === 'HASTA' ? 4000 : 2000;
       await sleep(pausaPost);
 
-      const val = await Promise.race([
+      const val = await conTimeout(
         contexto.evaluate(el => el.value, inp),
-        sleep(5000).then(() => '(timeout)'),
-      ]);
+        5000, `leer valor ${label}`,
+      ).catch(() => '(timeout)');
       console.log(`  ✅ ${label} = "${val}"`);
     } catch (e) {
       console.log(`  ⚠️ Error en ${label}: ${e.message}`);
-      try { await contexto.keyboard.press('Escape'); } catch (_) {}
       await sleep(500);
     }
   }
@@ -274,9 +260,11 @@ async function setearFecha(page, fecha) {
 }
 
 // ─── EXPORTAR TABLA ───────────────────────────────────────────────────────────
+// Versión optimizada para Railway: interacciones via DOM directo (evaluate)
+// en vez de page.mouse.move/click que se cuelgan en CPUs lentas compartidas.
 async function exportarTabla(page) {
   console.log('  Exportando tabla de detalle...');
-  await sleep(1500);
+  await sleep(2000);
 
   const selectoresMenu = [
     'button.vcMenuBtn',
@@ -287,13 +275,13 @@ async function exportarTabla(page) {
     'button[class*="vcMenu"]',
   ];
 
-  // Buscar tabla de detalle inferior por columnas únicas
-  const tablaRect = await conTimeout(page.evaluate(() => {
+  // ── Paso 1: Encontrar el visual de la tabla y simular hover via JS ──
+  const tablaInfo = await conTimeout(page.evaluate(() => {
     const claves = ['NOMBRE LOCAL', 'RUT PERSONA', 'NOMBRE CARGO'];
     const fallback = ['NOMBRE LOCAL', 'NOMBRE PERSONA', 'NOMBRE PROVEEDOR'];
     const todos = Array.from(document.querySelectorAll('div, section, article'));
 
-    const buscar = (textos, minY) => {
+    function buscar(textos, minY) {
       let mejor = null;
       for (const el of todos) {
         const r = el.getBoundingClientRect();
@@ -301,83 +289,125 @@ async function exportarTabla(page) {
         const txt = el.textContent || '';
         const score = textos.filter(t => txt.includes(t)).length;
         if (score >= 2 && (!mejor || r.width * r.height < mejor.area)) {
-          mejor = { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height), area: r.width * r.height };
+          mejor = { el, x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height), area: r.width * r.height };
         }
       }
       return mejor;
-    };
+    }
 
-    return buscar(claves, 300) || buscar(fallback, 300);
-  }), 10000, 'buscar tabla de detalle').catch(e => { console.log(`  ⚠️ ${e.message}`); return null; });
+    const visual = buscar(claves, 300) || buscar(fallback, 300);
+    if (!visual) return null;
 
-  const cx   = tablaRect ? tablaRect.x + Math.round(tablaRect.w / 2) : 800;
-  const cyMid = tablaRect ? tablaRect.y + Math.round(tablaRect.h / 2) : 700;
-  const cyTop = tablaRect ? tablaRect.y + 5 : 500;
+    // Simular hover sobre el visual para que Power BI revele el botón "..."
+    const cx = visual.x + visual.w / 2;
+    const cyTop = visual.y + 10;
+    for (const evType of ['mouseenter', 'mouseover', 'mousemove']) {
+      visual.el.dispatchEvent(new MouseEvent(evType, {
+        bubbles: true, clientX: cx, clientY: cyTop, view: window,
+      }));
+    }
+    // También disparar click para dar foco al visual
+    visual.el.dispatchEvent(new MouseEvent('click', {
+      bubbles: true, clientX: cx, clientY: visual.y + visual.h / 2, view: window,
+    }));
 
-  console.log(`  Tabla en cx=${cx}, cyMid=${cyMid}, cyTop=${cyTop}`);
+    return { x: visual.x, y: visual.y, w: visual.w, h: visual.h };
+  }), 15000, 'buscar visual de tabla');
 
-  // Click en el centro de la tabla
-  await page.mouse.move(cx, cyMid);
-  await sleep(400);
-  await page.mouse.click(cx, cyMid);
-  await sleep(800);
+  if (!tablaInfo) throw new Error('No se encontró la tabla de detalle en la página');
+  console.log(`  ✅ Visual encontrado en (${tablaInfo.x}, ${tablaInfo.y}) ${tablaInfo.w}x${tablaInfo.h}`);
 
-  // Subir mouse lentamente para revelar el botón "..."
+  // Dar tiempo a que Power BI reaccione al hover
+  await sleep(2500);
+
+  // ── Paso 2: Buscar y clickear el botón "..." ──
+  // Intentar varias veces: re-disparar hover + buscar botón
   let clickOk = false;
-  for (const xTry of [cx, tablaRect ? tablaRect.x + tablaRect.w - 40 : 1400]) {
-    if (clickOk) break;
-    for (let y = cyMid; y >= cyTop - 20; y -= 10) {
-      await page.mouse.move(xTry, y);
-      await sleep(120);
-      const res = await conTimeout(page.evaluate((sels) => {
-        for (const sel of sels) {
-          for (const btn of document.querySelectorAll(sel)) {
-            const r = btn.getBoundingClientRect();
-            if (r.width > 0 && r.height > 0 && r.x > 100 && r.y > 100) {
-              btn.click();
-              return { ok: true, sel, x: Math.round(r.x), y: Math.round(r.y) };
-            }
+  for (let intento = 0; intento < 10; intento++) {
+    const res = await conTimeout(page.evaluate((sels, tbl) => {
+      // Re-hover para mantener el menú visible
+      const cx = tbl.x + tbl.w / 2;
+      const cyTop = tbl.y + 10;
+      const elAtPoint = document.elementFromPoint(cx, cyTop);
+      if (elAtPoint) {
+        for (const evType of ['mousemove', 'mouseover', 'mouseenter']) {
+          elAtPoint.dispatchEvent(new MouseEvent(evType, {
+            bubbles: true, clientX: cx, clientY: cyTop, view: window,
+          }));
+        }
+      }
+
+      // Buscar botón visible
+      for (const sel of sels) {
+        for (const btn of document.querySelectorAll(sel)) {
+          const r = btn.getBoundingClientRect();
+          if (r.width > 0 && r.height > 0) {
+            btn.click();
+            return { ok: true, sel, x: Math.round(r.x), y: Math.round(r.y) };
           }
         }
-        return null;
-      }, selectoresMenu), 5000, 'buscar botón de menú').catch(() => null);
-      if (res) { console.log(`  ✅ Menú en (${res.x},${res.y})`); clickOk = true; break; }
+      }
+      return null;
+    }, selectoresMenu, tablaInfo), 5000, 'click menú "..."').catch(() => null);
+
+    if (res) {
+      console.log(`  ✅ Menú "..." clickeado en (${res.x}, ${res.y})`);
+      clickOk = true;
+      break;
     }
+
+    // Fallback: un solo movimiento de mouse real (no un loop de cientos)
+    try {
+      const yPos = tablaInfo.y + 5 + (intento * 3);
+      await page.mouse.move(tablaInfo.x + tablaInfo.w / 2, yPos);
+    } catch (_) {}
+    await sleep(1500);
+    if (intento % 3 === 0) console.log(`  ⌛ Buscando menú "..."... intento ${intento + 1}/10`);
   }
 
-  if (!clickOk) throw new Error('No se encontró botón de menú del visual');
-  await sleep(1200);
+  if (!clickOk) throw new Error('No se encontró botón de menú "..." del visual');
+  await sleep(2000);
 
-  // Click en "Exportar datos"
-  const exportado = await conTimeout(page.evaluate(() => {
-    for (const txt of ['Exportar datos', 'Export data']) {
-      for (const sel of ['button.pbi-menu-item', '[role="menuitem"]', 'button']) {
-        const item = Array.from(document.querySelectorAll(sel)).find(i => i.textContent.trim() === txt);
-        if (item && item.getBoundingClientRect().width > 0) { item.click(); return txt; }
+  // ── Paso 3: Click en "Exportar datos" ──
+  let exportado = null;
+  for (let intento = 0; intento < 6; intento++) {
+    exportado = await conTimeout(page.evaluate(() => {
+      for (const txt of ['Exportar datos', 'Export data']) {
+        for (const sel of ['button.pbi-menu-item', '[role="menuitem"]', 'button', 'div[role="menuitem"]', 'span']) {
+          const items = Array.from(document.querySelectorAll(sel));
+          const item = items.find(i => i.textContent.trim() === txt);
+          if (item && item.getBoundingClientRect().width > 0) {
+            item.click();
+            return txt;
+          }
+        }
       }
-    }
-    return null;
-  }), 8000, 'click "Exportar datos"').catch(() => null);
+      return null;
+    }), 5000, 'click "Exportar datos"').catch(() => null);
+    if (exportado) break;
+    await sleep(1000);
+  }
   if (!exportado) throw new Error('No se encontró "Exportar datos" en el menú');
   console.log(`  ✅ "${exportado}" clickeado`);
   await sleep(3000);
 
-  // Confirmar diálogo (cada intento con su propio timeout — si Chrome se
-  // cuelga acá, antes se quedaba esperando para siempre en vez de fallar)
-  for (let i = 0; i < 20; i++) {
+  // ── Paso 4: Confirmar diálogo de exportación ──
+  let confirmado = false;
+  for (let i = 0; i < 25; i++) {
     const ok = await conTimeout(page.evaluate(() => {
       const btns = Array.from(document.querySelectorAll('button')).filter(b => {
         const r = b.getBoundingClientRect();
-        return ['Exportar','Export'].includes(b.textContent.trim()) && r.width > 0;
+        return ['Exportar', 'Export'].includes(b.textContent.trim()) && r.width > 0;
       });
       if (btns.length === 0) return false;
       btns[btns.length - 1].click();
       return true;
-    }), 5000, 'confirmar diálogo de exportación').catch(() => false);
-    if (ok) { console.log(`  ✅ Diálogo confirmado`); break; }
-    if (i % 4 === 0) console.log(`  ⌛ Esperando diálogo... ${i+1}/20`);
-    await sleep(500);
+    }), 5000, 'confirmar exportación').catch(() => false);
+    if (ok) { console.log('  ✅ Diálogo confirmado'); confirmado = true; break; }
+    if (i % 5 === 0) console.log(`  ⌛ Esperando diálogo... ${i + 1}/25`);
+    await sleep(800);
   }
+  if (!confirmado) console.log('  ⚠️ Diálogo no confirmado, la descarga podría haber iniciado igual');
 }
 
 // ─── ENVIAR EMAIL (nodemailer + Gmail App Password) ──────────────────────────
@@ -510,8 +540,13 @@ async function descargarAsistencia() {
       const inputSelector = 'input[type="email"], input[type="text"], input[name="email"], input';
       await page.waitForSelector(inputSelector, { visible: true, timeout: 15000 });
       const emailInput = await page.$(inputSelector);
-      await emailInput.click({ clickCount: 3 });
-      await emailInput.type(CONFIG.pbiEmail, { delay: 80 });
+      await page.evaluate((el, val) => {
+        el.focus(); el.value = '';
+        const ns = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+        ns.call(el, val);
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+      }, emailInput, CONFIG.pbiEmail);
       console.log('  ✅ Email ingresado');
 
       // Click en "Enviar" / "Submit"
@@ -584,7 +619,7 @@ async function descargarAsistencia() {
     // Red de seguridad: si Chrome queda sin responder en CUALQUIER punto de
     // exportarTabla (incluidos los movimientos de mouse, que no tienen timeout
     // propio), esto corta a los 45s en vez de quedarse colgado para siempre.
-    await conTimeout(exportarTabla(page), 45000, 'exportarTabla (posible Chrome colgado)');
+    await conTimeout(exportarTabla(page), 90000, 'exportarTabla (posible Chrome colgado)');
 
     // Esperar descarga: eventos CDP si el navegador los dispara, pero también
     // se revisa la carpeta directamente — en algunos entornos (Chromium del
