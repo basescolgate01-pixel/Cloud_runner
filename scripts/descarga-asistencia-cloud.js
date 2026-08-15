@@ -629,6 +629,8 @@ async function descargarAsistencia() {
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
         '--disable-gpu',
+        '--no-zygote',          // reduce procesos hijo → menos memoria en Railway
+        '--single-process',     // todo en un proceso → evita OOM en containers
         '--window-size=1920,1080',
         '--disable-blink-features=AutomationControlled',
         '--lang=es-CL',
@@ -640,6 +642,8 @@ async function descargarAsistencia() {
         '--disable-translate',
         '--hide-scrollbars',
         '--mute-audio',
+        '--disable-features=TranslateUI,VizDisplayCompositor',
+        '--js-flags=--max-old-space-size=512',  // limita heap V8 a 512MB
       ],
       env: { ...process.env, LANG: 'es_CL.UTF-8', LANGUAGE: 'es_CL:es' },
       defaultViewport: { width: 1920, height: 1080 },
@@ -657,6 +661,10 @@ async function descargarAsistencia() {
     });
     page.on('error', (err) => {
       console.log(`  ⚠️ Page error: ${err.message}`);
+      // 'Page crashed!' llega como error en algunos entornos, no como crash event
+      if (err.message.toLowerCase().includes('crash')) {
+        paginaCrasheada = true;
+      }
     });
     await page.evaluateOnNewDocument(() => {
       Object.defineProperty(navigator, 'webdriver', { get: () => false });
@@ -773,27 +781,31 @@ async function descargarAsistencia() {
     await sleep(esperaReporte); // Railway necesita más tiempo para renderizar Power BI
     console.log('✅ Reporte cargado');
 
-    // Fechas — si la página crashea durante el seteo, seguimos al export igual.
-    // Power BI a veces crashea en headless al abrir popups de calendario;
-    // si el reporte tiene la fecha correcta por defecto, el export igual sirve.
+    // Si la página crasheó durante la carga inicial, navegar de nuevo al reporte
+    if (paginaCrasheada) {
+      console.log('\n🔄 Crash detectado — navegando de vuelta al reporte...');
+      paginaCrasheada = false;
+      try {
+        await page.goto(CONFIG.powerBiUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+        await page.waitForFunction(
+          () => window.location.href.includes('app.powerbi.com/groups'),
+          { timeout: 60000 }
+        );
+        await sleep(45000);
+        console.log('  ✅ Reporte recargado');
+      } catch (e) {
+        console.log(`  ⚠️ Recarga fallida: ${e.message} — intentando exportar igual`);
+      }
+    }
+
+    // Setear fecha solo si la página está sana
     if (!paginaCrasheada) {
       console.log(`\n📅 Seteando fecha: ${getFechaFiltro()}`);
       await setearFecha(page, getFechaFiltro()).catch(e => {
         console.log(`  ⚠️ setearFecha error: ${e.message}`);
       });
-    }
-
-    // Si la página crasheó durante el seteo de fecha, necesitamos recargarla
-    if (paginaCrasheada) {
-      console.log('\n🔄 Recargando página tras crash...');
-      paginaCrasheada = false;
-      try {
-        await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
-        await sleep(30000);
-        console.log('  ✅ Página recargada');
-      } catch (e) {
-        console.log(`  ⚠️ Recarga fallida: ${e.message} — intentando igual`);
-      }
+    } else {
+      console.log('\n⚠️ Exportando sin filtro de fecha (página crasheó)');
     }
 
     // Exportar
