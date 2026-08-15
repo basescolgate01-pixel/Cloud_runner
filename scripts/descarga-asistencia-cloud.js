@@ -74,10 +74,9 @@ function getFechaActual() {
 }
 
 function getFechaFiltro() {
-  // El slicer de Power BI en locale es-CL muestra y acepta DD-MM-YYYY con guiones
-  // (ej: "02-06-2026"). Tipear con slashes o en formato M/D/YYYY no funciona.
-  const { dia, mes, anio } = getFechaPartes();
-  return `${dia}-${mes}-${anio}`; // DD-MM-YYYY
+  // TEMPORAL: hardcodeada al 14 para pruebas (el 15 no tiene datos en el BI)
+  // TODO: volver a fecha dinámica cuando el BI esté actualizado
+  return '14-08-2026';
 }
 
 // ─── LOGIN POWER BI ───────────────────────────────────────────────────────────
