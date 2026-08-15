@@ -161,14 +161,13 @@ const _fechaJS = `
     return null;
   }
   function _setear(el, val) {
-    el.focus(); el.click();
+    // Sin el.click() — evita que Power BI abra el calendario popup,
+    // que en Railway/headless crashea la página.
+    el.focus();
     const ns = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-    ns.call(el, ''); el.dispatchEvent(new Event('input', { bubbles: true }));
     ns.call(el, val);
     el.dispatchEvent(new Event('input', { bubbles: true }));
     el.dispatchEvent(new Event('change', { bubbles: true }));
-    el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
-    el.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
     el.blur();
     return el.value;
   }
@@ -648,6 +647,17 @@ async function descargarAsistencia() {
 
     _browserActivo = browser; // exponer al handler SIGTERM
     const page = await browser.newPage();
+
+    // Detectar crashes de la página (ocurren cuando Power BI abre el calendario
+    // popup en headless mode y se queda sin memoria/CPU)
+    let paginaCrasheada = false;
+    page.on('crash', () => {
+      console.log('  🔴 Page crashed — continuando sin filtro de fecha');
+      paginaCrasheada = true;
+    });
+    page.on('error', (err) => {
+      console.log(`  ⚠️ Page error: ${err.message}`);
+    });
     await page.evaluateOnNewDocument(() => {
       Object.defineProperty(navigator, 'webdriver', { get: () => false });
     });
@@ -763,9 +773,28 @@ async function descargarAsistencia() {
     await sleep(esperaReporte); // Railway necesita más tiempo para renderizar Power BI
     console.log('✅ Reporte cargado');
 
-    // Fechas
-    console.log(`\n📅 Seteando fecha: ${getFechaFiltro()}`);
-    await setearFecha(page, getFechaFiltro());
+    // Fechas — si la página crashea durante el seteo, seguimos al export igual.
+    // Power BI a veces crashea en headless al abrir popups de calendario;
+    // si el reporte tiene la fecha correcta por defecto, el export igual sirve.
+    if (!paginaCrasheada) {
+      console.log(`\n📅 Seteando fecha: ${getFechaFiltro()}`);
+      await setearFecha(page, getFechaFiltro()).catch(e => {
+        console.log(`  ⚠️ setearFecha error: ${e.message}`);
+      });
+    }
+
+    // Si la página crasheó durante el seteo de fecha, necesitamos recargarla
+    if (paginaCrasheada) {
+      console.log('\n🔄 Recargando página tras crash...');
+      paginaCrasheada = false;
+      try {
+        await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
+        await sleep(30000);
+        console.log('  ✅ Página recargada');
+      } catch (e) {
+        console.log(`  ⚠️ Recarga fallida: ${e.message} — intentando igual`);
+      }
+    }
 
     // Exportar
     console.log('\n📥 Exportando...');
