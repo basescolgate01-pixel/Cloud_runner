@@ -389,28 +389,20 @@ async function enviarEmail(archivoPath, fecha) {
 
   const filename = path.basename(archivoPath);
 
-  // Intentar con 3 configuraciones SMTP distintas (Railway puede bloquear
-  // ciertos puertos o protocolos según su infra del momento):
-  //   1. SMTP con STARTTLS en puerto 587 (el más compatible)
-  //   2. SMTPS directo en puerto 465
-  //   3. service: 'gmail' (auto-config de nodemailer)
-  const configs = [
-    { host: 'smtp.gmail.com', port: 587, secure: false, connectionTimeout: 15000, greetingTimeout: 10000 },
-    { host: 'smtp.gmail.com', port: 465, secure: true, connectionTimeout: 15000, greetingTimeout: 10000 },
-    { service: 'gmail', connectionTimeout: 15000, greetingTimeout: 10000 },
+  // ── Intento 1: SMTP (funciona en local, Railway lo bloquea) ──
+  const smtpConfigs = [
+    { host: 'smtp.gmail.com', port: 587, secure: false, connectionTimeout: 10000, greetingTimeout: 8000 },
+    { host: 'smtp.gmail.com', port: 465, secure: true, connectionTimeout: 10000, greetingTimeout: 8000 },
   ];
 
-  for (let i = 0; i < configs.length; i++) {
-    const cfg = configs[i];
-    const label = cfg.port ? `puerto ${cfg.port}` : 'service:gmail';
-    console.log(`  Intento ${i + 1}/3 (${label})...`);
-
+  for (let i = 0; i < smtpConfigs.length; i++) {
+    const cfg = smtpConfigs[i];
+    console.log(`  Intento ${i + 1}/${smtpConfigs.length} (SMTP :${cfg.port})...`);
     try {
       const transporter = nodemailer.createTransport({
         ...cfg,
         auth: { user: CONFIG.gmailUser, pass: CONFIG.gmailAppPass },
       });
-
       await transporter.sendMail({
         from: `"Asistencia Power BI" <${CONFIG.gmailUser}>`,
         to: CONFIG.emailDestino,
@@ -418,15 +410,44 @@ async function enviarEmail(archivoPath, fecha) {
         text: `Adjunto el reporte de asistencia del ${fecha}.`,
         attachments: [{ filename, path: archivoPath }],
       });
-
-      console.log('  ✅ Email enviado');
+      console.log('  ✅ Email enviado via SMTP');
       return;
     } catch (err) {
-      console.log(`  ⚠️ Falló (${label}): ${err.message}`);
+      console.log(`  ⚠️ SMTP :${cfg.port}: ${err.message}`);
     }
   }
 
-  throw new Error('No se pudo enviar email por ningún puerto SMTP');
+  // ── Intento 2: Resend HTTP API (funciona en Railway, necesita RESEND_API_KEY) ──
+  const resendKey = process.env.RESEND_API_KEY;
+  if (resendKey) {
+    console.log('  Intento 3/3 (Resend HTTP API)...');
+    try {
+      const fileBase64 = fs.readFileSync(archivoPath).toString('base64');
+      const res = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${resendKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          from: 'Asistencia Power BI <onboarding@resend.dev>',
+          to: [CONFIG.emailDestino],
+          subject: `Asistencia Google_CO ${fecha}`,
+          text: `Adjunto el reporte de asistencia del ${fecha}.`,
+          attachments: [{ filename, content: fileBase64 }],
+        }),
+      });
+      const body = await res.json();
+      if (res.ok) { console.log('  ✅ Email enviado via Resend'); return; }
+      throw new Error(body.message || JSON.stringify(body));
+    } catch (err) {
+      console.log(`  ⚠️ Resend: ${err.message}`);
+    }
+  }
+
+  // ── No se pudo enviar — no fallar el job, la descarga ya está lista ──
+  console.log('  ⚠️ Email no enviado. Archivo disponible en:', archivoPath);
+  if (!resendKey) {
+    console.log('  ℹ️  Para enviar email desde Railway, agregar RESEND_API_KEY');
+    console.log('  ℹ️  Crear cuenta gratis en https://resend.com (100 emails/día)');
+  }
 }
 
 // ─── LIMPIEZA AL DETENER ──────────────────────────────────────────────────────
