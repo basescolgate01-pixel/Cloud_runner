@@ -570,34 +570,39 @@ async function descargarAsistencia() {
     console.log('\n📥 Exportando...');
     await exportarTabla(page);
 
-    // Esperar descarga usando eventos CDP (más confiable que polling)
+    // Esperar descarga: eventos CDP si el navegador los dispara, pero también
+    // se revisa la carpeta directamente — en algunos entornos (Chromium del
+    // sistema en Railway, distinto al bundleado con Puppeteer) el evento
+    // Browser.downloadWillBegin nunca llega aunque el archivo sí se escriba.
     console.log('\n⏳ Esperando descarga...');
+    let rutaArchivo = null;
     for (let i = 0; i < 90; i++) {
       await sleep(1000);
-      if (downloadInfo?.done) break;
+      if (downloadInfo?.error) throw new Error('La descarga fue cancelada por Chrome');
+
+      const nuevos = fs.readdirSync(CONFIG.downloadPath).filter(f =>
+        !archivosAntes.has(f) && f.endsWith('.xlsx') && !f.endsWith('.crdownload') && !f.includes('.tmp')
+      );
+      if (nuevos.length > 0) {
+        const reciente = nuevos
+          .map(f => ({ f, mtime: fs.statSync(path.join(CONFIG.downloadPath, f)).mtime }))
+          .sort((a, b) => b.mtime - a.mtime)[0].f;
+        const stat = fs.statSync(path.join(CONFIG.downloadPath, reciente));
+        if (stat.size > 1024) { rutaArchivo = path.join(CONFIG.downloadPath, reciente); break; }
+      }
+      if (downloadInfo?.done && !rutaArchivo) {
+        // Chrome confirmó la descarga por evento — buscar por nombre sugerido o guid
+        const posibles = [
+          path.join(CONFIG.downloadPath, downloadInfo.name || ''),
+          path.join(CONFIG.downloadPath, downloadInfo.guid || ''),
+        ];
+        rutaArchivo = posibles.find(p => fs.existsSync(p)) || rutaArchivo;
+        if (rutaArchivo) break;
+      }
       if (i % 10 === 0) console.log(`  ⌛ ${i + 1}/90 seg...`);
     }
 
-    if (!downloadInfo || !downloadInfo.done) throw new Error('Timeout: la descarga no completó en 90 segundos');
-    if (downloadInfo.error) throw new Error('La descarga fue cancelada por Chrome');
-
-    // Buscar el archivo: puede llamarse igual al sugerido, o ser el guid
-    const posibles = [
-      path.join(CONFIG.downloadPath, downloadInfo.name),
-      path.join(CONFIG.downloadPath, downloadInfo.guid),
-    ];
-    let rutaArchivo = posibles.find(p => fs.existsSync(p));
-
-    // Último fallback: el xlsx más reciente en la carpeta
-    if (!rutaArchivo) {
-      const recientes = fs.readdirSync(CONFIG.downloadPath)
-        .filter(f => f.endsWith('.xlsx') && !f.includes('.tmp'))
-        .map(f => ({ f, mtime: fs.statSync(path.join(CONFIG.downloadPath, f)).mtime }))
-        .sort((a, b) => b.mtime - a.mtime);
-      if (recientes.length > 0) rutaArchivo = path.join(CONFIG.downloadPath, recientes[0].f);
-    }
-
-    if (!rutaArchivo) throw new Error(`Archivo no encontrado en ${CONFIG.downloadPath}`);
+    if (!rutaArchivo) throw new Error(`Archivo no encontrado en ${CONFIG.downloadPath} (timeout 90s)`);
 
     const archivoDescargado = path.basename(rutaArchivo);
     const carpetaDescargado = CONFIG.downloadPath;
