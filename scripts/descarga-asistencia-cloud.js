@@ -581,7 +581,10 @@ async function descargarAsistencia() {
 
     // Exportar
     console.log('\n📥 Exportando...');
-    await exportarTabla(page);
+    // Red de seguridad: si Chrome queda sin responder en CUALQUIER punto de
+    // exportarTabla (incluidos los movimientos de mouse, que no tienen timeout
+    // propio), esto corta a los 45s en vez de quedarse colgado para siempre.
+    await conTimeout(exportarTabla(page), 45000, 'exportarTabla (posible Chrome colgado)');
 
     // Esperar descarga: eventos CDP si el navegador los dispara, pero también
     // se revisa la carpeta directamente — en algunos entornos (Chromium del
