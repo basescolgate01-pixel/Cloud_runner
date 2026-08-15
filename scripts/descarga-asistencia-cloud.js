@@ -371,19 +371,47 @@ async function exportarTabla(page) {
   await sleep(3000);
 
   // ── Paso 4: Confirmar diálogo de exportación ──
+  // El diálogo tiene: radios de tipo de datos + botón "Exportar" + botón "Cancelar".
+  // Antes clickeábamos el ÚLTIMO botón "Exportar", pero eso puede ser el equivocado
+  // si el DOM tiene otros. Preferimos el botón dentro del diálogo modal.
   let confirmado = false;
   for (let i = 0; i < 25; i++) {
-    const ok = await conTimeout(page.evaluate(() => {
-      const btns = Array.from(document.querySelectorAll('button')).filter(b => {
-        const r = b.getBoundingClientRect();
-        return ['Exportar', 'Export'].includes(b.textContent.trim()) && r.width > 0;
+    const res = await conTimeout(page.evaluate(() => {
+      // Buscar el diálogo modal de exportación
+      const dialogos = Array.from(document.querySelectorAll(
+        '[role="dialog"], .modalDialogPopup, .ms-Dialog, .exportDialog, [class*="export"][class*="dialog"], [class*="ExportDialog"]'
+      ));
+      const modal = dialogos.find(d => {
+        const r = d.getBoundingClientRect();
+        return r.width > 200 && r.height > 100;
       });
-      if (btns.length === 0) return false;
-      btns[btns.length - 1].click();
-      return true;
-    }), 5000, 'confirmar exportación').catch(() => false);
-    if (ok) { console.log('  ✅ Diálogo confirmado'); confirmado = true; break; }
-    if (i % 5 === 0) console.log(`  ⌛ Esperando diálogo... ${i + 1}/25`);
+
+      const scope = modal || document;
+
+      // Botones "Exportar" o "Export" dentro del scope (no "Cancelar")
+      const btns = Array.from(scope.querySelectorAll('button')).filter(b => {
+        const t = b.textContent.trim();
+        const r = b.getBoundingClientRect();
+        return (t === 'Exportar' || t === 'Export') && r.width > 0 && !b.disabled;
+      });
+
+      if (btns.length === 0) return { ok: false, modal: !!modal };
+
+      // Preferir el que se ve como botón primary/principal
+      const primary = btns.find(b => {
+        const cls = b.className || '';
+        return /primary|main|acepta|confirm/i.test(cls);
+      });
+      (primary || btns[btns.length - 1]).click();
+      return { ok: true, modal: !!modal, count: btns.length };
+    }), 5000, 'confirmar exportación').catch(() => ({ ok: false }));
+
+    if (res.ok) {
+      console.log(`  ✅ Diálogo confirmado ${res.modal ? '(modal detectado)' : '(sin modal)'}`);
+      confirmado = true;
+      break;
+    }
+    if (i % 5 === 0) console.log(`  ⌛ Esperando diálogo... ${i + 1}/25 (modal: ${res.modal ? 'sí' : 'no'})`);
     await sleep(800);
   }
   if (!confirmado) console.log('  ⚠️ Diálogo no confirmado, la descarga podría haber iniciado igual');
@@ -729,11 +757,18 @@ async function descargarAsistencia() {
     // Browser.downloadWillBegin nunca llega aunque el archivo sí se escriba.
     console.log('\n⏳ Esperando descarga...');
     let rutaArchivo = null;
-    for (let i = 0; i < 90; i++) {
+    const TIMEOUT_DESCARGA = 180; // Railway a veces tarda >90s en iniciar/completar
+    let ultimoParcial = null;      // último tamaño de .crdownload visto (para detectar progreso)
+    let ultimoParcialCambio = 0;
+
+    for (let i = 0; i < TIMEOUT_DESCARGA; i++) {
       await sleep(1000);
       if (downloadInfo?.error) throw new Error('La descarga fue cancelada por Chrome');
 
-      const nuevos = fs.readdirSync(CONFIG.downloadPath).filter(f =>
+      const contenido = fs.readdirSync(CONFIG.downloadPath);
+
+      // ¿Hay un .xlsx completo (no crdownload)?
+      const nuevos = contenido.filter(f =>
         !archivosAntes.has(f) && f.endsWith('.xlsx') && !f.endsWith('.crdownload') && !f.includes('.tmp')
       );
       if (nuevos.length > 0) {
@@ -743,8 +778,24 @@ async function descargarAsistencia() {
         const stat = fs.statSync(path.join(CONFIG.downloadPath, reciente));
         if (stat.size > 1024) { rutaArchivo = path.join(CONFIG.downloadPath, reciente); break; }
       }
+
+      // ¿Hay una descarga parcial en curso? (útil para saber si Chrome está bajando)
+      const parciales = contenido.filter(f => f.endsWith('.crdownload') || f.includes('.tmp'));
+      if (parciales.length > 0) {
+        const sizes = parciales.map(f => {
+          try { return fs.statSync(path.join(CONFIG.downloadPath, f)).size; } catch { return 0; }
+        });
+        const totalParcial = sizes.reduce((a, b) => a + b, 0);
+        if (totalParcial !== ultimoParcial) {
+          ultimoParcial = totalParcial;
+          ultimoParcialCambio = i;
+        }
+        if (i % 10 === 0) console.log(`  ⌛ ${i + 1}/${TIMEOUT_DESCARGA} seg... descarga parcial: ${parciales[0]} (${totalParcial} bytes)`);
+      } else if (i % 10 === 0) {
+        console.log(`  ⌛ ${i + 1}/${TIMEOUT_DESCARGA} seg... sin actividad de descarga`);
+      }
+
       if (downloadInfo?.done && !rutaArchivo) {
-        // Chrome confirmó la descarga por evento — buscar por nombre sugerido o guid
         const posibles = [
           path.join(CONFIG.downloadPath, downloadInfo.name || ''),
           path.join(CONFIG.downloadPath, downloadInfo.guid || ''),
@@ -752,10 +803,21 @@ async function descargarAsistencia() {
         rutaArchivo = posibles.find(p => fs.existsSync(p)) || rutaArchivo;
         if (rutaArchivo) break;
       }
-      if (i % 10 === 0) console.log(`  ⌛ ${i + 1}/90 seg...`);
     }
 
-    if (!rutaArchivo) throw new Error(`Archivo no encontrado en ${CONFIG.downloadPath} (timeout 90s)`);
+    if (!rutaArchivo) {
+      // Dump del estado para debug
+      const contenido = fs.readdirSync(CONFIG.downloadPath);
+      console.log(`  📂 Contenido de ${CONFIG.downloadPath}:`);
+      for (const f of contenido) {
+        try {
+          const s = fs.statSync(path.join(CONFIG.downloadPath, f));
+          console.log(`     - ${f} (${s.size} bytes, mtime ${s.mtime.toISOString()})`);
+        } catch { console.log(`     - ${f} (stat error)`); }
+      }
+      console.log(`  📊 downloadInfo: ${JSON.stringify(downloadInfo)}`);
+      throw new Error(`Archivo no encontrado en ${CONFIG.downloadPath} (timeout ${TIMEOUT_DESCARGA}s)`);
+    }
 
     const archivoDescargado = path.basename(rutaArchivo);
     const carpetaDescargado = CONFIG.downloadPath;
