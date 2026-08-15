@@ -147,84 +147,81 @@ async function manejarKMSI(page) {
 // En Railway, cualquier llamada que pase por el protocolo CDP (page.$$, inp.click,
 // inp.type) puede colgarse cuando Chrome está bajo presión de CPU/memoria.
 // evaluate() corre directo en el motor JS del browser y no depende del protocolo.
+// Helper JS inyectado en cada evaluate de fecha
+const _fechaJS = `
+  const _sels = [
+    'input.date-slicer-input',
+    'input[class*="date-slicer"]',
+    'input[class*="dateSlicer"]',
+    'input[type="text"][class*="slicer"]',
+  ];
+  function _buscar() {
+    for (const s of _sels) {
+      const ii = Array.from(document.querySelectorAll(s));
+      if (ii.length >= 2) return { sel: s, inputs: ii };
+    }
+    return null;
+  }
+  function _setear(el, val) {
+    el.focus(); el.click();
+    const ns = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+    ns.call(el, ''); el.dispatchEvent(new Event('input', { bubbles: true }));
+    ns.call(el, val);
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
+    el.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
+    el.blur();
+    return el.value;
+  }
+`;
+
 async function setearFecha(page, fecha) {
   console.log(`  Seteando fecha: ${fecha}`);
 
-  // Hacer TODO en un solo evaluate: buscar inputs, ordenar por posición X,
-  // setear HASTA (derecha) y DESDE (izquierda).
-  const resultado = await conTimeout(page.evaluate((fecha) => {
-    const selectores = [
-      'input.date-slicer-input',
-      'input[class*="date-slicer"]',
-      'input[class*="dateSlicer"]',
-      'input[type="text"][class*="slicer"]',
-    ];
+  // Separado en 2 evaluate con sleep entre medio, porque setear HASTA
+  // dispara un re-render síncrono en Power BI que puede bloquear el
+  // evaluate >20s si ambos campos se hacen en la misma llamada.
 
-    function buscarInputs() {
-      for (const sel of selectores) {
-        const inputs = Array.from(document.querySelectorAll(sel));
-        if (inputs.length >= 2) return { sel, inputs };
-      }
-      return null;
-    }
+  // ── HASTA (input derecho, idx 1) ──
+  const resHasta = await conTimeout(page.evaluate(new Function('fecha', `
+    ${_fechaJS}
+    const f = _buscar();
+    if (!f) return { ok: false, error: 'No se encontraron inputs de fecha' };
+    const sorted = f.inputs.map(el => ({ el, x: el.getBoundingClientRect().x })).sort((a, b) => a.x - b.x);
+    const idx = Math.min(1, sorted.length - 1);
+    const val = _setear(sorted[idx].el, fecha);
+    return { ok: true, sel: f.sel, count: f.inputs.length, val };
+  `), fecha), 30000, 'setear HASTA').catch(e => ({ ok: false, error: e.message }));
 
-    function setearInput(el, val) {
-      el.focus();
-      el.click();
-      const ns = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-      ns.call(el, '');
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      ns.call(el, val);
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-      el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
-      el.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
-      el.blur();
-      return el.value;
-    }
-
-    const found = buscarInputs();
-    if (!found) return { ok: false, error: 'No se encontraron inputs de fecha' };
-
-    // Ordenar por posición X: idx 0 = DESDE (izq), idx 1 = HASTA (der)
-    const sorted = found.inputs
-      .map(el => ({ el, x: el.getBoundingClientRect().x }))
-      .sort((a, b) => a.x - b.x);
-
-    const results = {};
-
-    // HASTA primero (idx 1)
-    if (sorted.length > 1) {
-      results.hasta = setearInput(sorted[1].el, fecha);
-    }
-
-    // Pausa entre campos (Power BI re-renderiza)
-    // No podemos hacer sleep() dentro de evaluate, pero el re-render es síncrono
-
-    // DESDE (idx 0) — re-buscar porque Power BI pudo re-renderizar los inputs
-    const found2 = buscarInputs();
-    if (found2) {
-      const sorted2 = found2.inputs
-        .map(el => ({ el, x: el.getBoundingClientRect().x }))
-        .sort((a, b) => a.x - b.x);
-      results.desde = setearInput(sorted2[0].el, fecha);
-    } else {
-      results.desde = '(inputs desaparecieron tras HASTA)';
-    }
-
-    return { ok: true, sel: found.sel, count: found.inputs.length, ...results };
-  }, fecha), 20000, 'setearFecha completo');
-
-  if (!resultado?.ok) {
-    console.log(`  ⚠️ ${resultado?.error || 'Error desconocido seteando fechas'}`);
+  if (resHasta.ok) {
+    console.log(`  ✅ Inputs encontrados (${resHasta.sel}): ${resHasta.count}`);
+    console.log(`  ✅ HASTA = "${resHasta.val}"`);
   } else {
-    console.log(`  ✅ Inputs encontrados (${resultado.sel}): ${resultado.count}`);
-    console.log(`  ✅ HASTA = "${resultado.hasta}"`);
-    console.log(`  ✅ DESDE = "${resultado.desde}"`);
+    console.log(`  ⚠️ HASTA: ${resHasta.error}`);
   }
 
-  // Esperar a que Power BI aplique los filtros y re-renderice
-  await sleep(8000);
+  // Esperar re-render de Power BI entre campos
+  await sleep(6000);
+
+  // ── DESDE (input izquierdo, idx 0) ──
+  const resDesde = await conTimeout(page.evaluate(new Function('fecha', `
+    ${_fechaJS}
+    const f = _buscar();
+    if (!f) return { ok: false, error: 'Inputs no encontrados tras HASTA' };
+    const sorted = f.inputs.map(el => ({ el, x: el.getBoundingClientRect().x })).sort((a, b) => a.x - b.x);
+    const val = _setear(sorted[0].el, fecha);
+    return { ok: true, val };
+  `), fecha), 30000, 'setear DESDE').catch(e => ({ ok: false, error: e.message }));
+
+  if (resDesde.ok) {
+    console.log(`  ✅ DESDE = "${resDesde.val}"`);
+  } else {
+    console.log(`  ⚠️ DESDE: ${resDesde.error}`);
+  }
+
+  // Esperar a que Power BI aplique filtros y re-renderice la tabla
+  await sleep(10000);
 }
 
 // ─── EXPORTAR TABLA ───────────────────────────────────────────────────────────
