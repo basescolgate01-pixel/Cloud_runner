@@ -389,11 +389,87 @@ async function exportarTabla(page) {
   if (!confirmado) console.log('  ⚠️ Diálogo no confirmado, la descarga podría haber iniciado igual');
 }
 
-// ─── ENVIAR EMAIL (nodemailer + Gmail App Password) ──────────────────────────
+// ─── ENVIAR EMAIL ────────────────────────────────────────────────────────────
+// Método 1: Gmail API por HTTPS (funciona en Railway, que bloquea SMTP).
+// Método 2: SMTP con App Password (funciona en local).
+// Método 3: Resend HTTP API (si hay RESEND_API_KEY).
+
+// Obtener access token de Gmail usando el refresh token (OAuth2)
+async function gmailAccessToken() {
+  const res = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      client_id:     process.env.GMAIL_CLIENT_ID,
+      client_secret: process.env.GMAIL_CLIENT_SECRET,
+      refresh_token: process.env.GMAIL_REFRESH_TOKEN,
+      grant_type:    'refresh_token',
+    }),
+  });
+  const body = await res.json();
+  if (!res.ok || !body.access_token) {
+    throw new Error(`OAuth: ${body.error_description || body.error || res.status}`);
+  }
+  return body.access_token;
+}
+
+// Construir mensaje MIME con adjunto y enviarlo via Gmail API
+async function enviarViaGmailAPI(archivoPath, fecha) {
+  const token = await gmailAccessToken();
+  const filename = path.basename(archivoPath);
+  const fileBase64 = fs.readFileSync(archivoPath).toString('base64');
+  const boundary = 'boundary_' + Date.now();
+
+  const mime = [
+    `From: "Asistencia Power BI" <${CONFIG.gmailUser}>`,
+    `To: ${CONFIG.emailDestino}`,
+    `Subject: Asistencia Google_CO ${fecha}`,
+    'MIME-Version: 1.0',
+    `Content-Type: multipart/mixed; boundary="${boundary}"`,
+    '',
+    `--${boundary}`,
+    'Content-Type: text/plain; charset="UTF-8"',
+    '',
+    `Adjunto el reporte de asistencia del ${fecha}.`,
+    '',
+    `--${boundary}`,
+    'Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    `Content-Disposition: attachment; filename="${filename}"`,
+    'Content-Transfer-Encoding: base64',
+    '',
+    fileBase64,
+    `--${boundary}--`,
+  ].join('\r\n');
+
+  const raw = Buffer.from(mime).toString('base64url');
+
+  const res = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ raw }),
+  });
+  const body = await res.json();
+  if (!res.ok) throw new Error(body.error?.message || JSON.stringify(body));
+}
+
 async function enviarEmail(archivoPath, fecha) {
   console.log(`\n📧 Enviando email a ${CONFIG.emailDestino}...`);
 
   const filename = path.basename(archivoPath);
+
+  // ── Intento 0: Gmail API (HTTPS — funciona en Railway) ──
+  if (process.env.GMAIL_CLIENT_ID && process.env.GMAIL_CLIENT_SECRET && process.env.GMAIL_REFRESH_TOKEN) {
+    console.log('  Intento: Gmail API (HTTPS)...');
+    try {
+      await enviarViaGmailAPI(archivoPath, fecha);
+      console.log('  ✅ Email enviado via Gmail API');
+      return;
+    } catch (err) {
+      console.log(`  ⚠️ Gmail API: ${err.message}`);
+    }
+  } else {
+    console.log('  ℹ️  Gmail API no configurada (faltan GMAIL_CLIENT_ID/SECRET/REFRESH_TOKEN)');
+  }
 
   // ── Intento 1: SMTP (funciona en local, Railway lo bloquea) ──
   const smtpConfigs = [
