@@ -41,6 +41,18 @@ const CONFIG = {
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
+// Envuelve una promesa con un timeout propio. Imprescindible con Puppeteer:
+// si Chrome queda sin responder (falta de CPU, página colgada, etc.), un
+// page.evaluate() puede quedarse esperando para siempre en vez de fallar.
+// Preferimos que falle rápido y quede claro en el log dónde se atascó.
+function conTimeout(promesa, ms, etiqueta) {
+  let h;
+  return Promise.race([
+    promesa,
+    new Promise((_, rej) => { h = setTimeout(() => rej(new Error(`Timeout (${ms / 1000}s) en: ${etiqueta}`)), ms); }),
+  ]).finally(() => clearTimeout(h));
+}
+
 function getFechaPartes() {
   // Siempre usar hora de Santiago (UTC-3/UTC-4) independiente del servidor
   const partes = new Intl.DateTimeFormat('es-CL', {
@@ -276,7 +288,7 @@ async function exportarTabla(page) {
   ];
 
   // Buscar tabla de detalle inferior por columnas únicas
-  const tablaRect = await page.evaluate(() => {
+  const tablaRect = await conTimeout(page.evaluate(() => {
     const claves = ['NOMBRE LOCAL', 'RUT PERSONA', 'NOMBRE CARGO'];
     const fallback = ['NOMBRE LOCAL', 'NOMBRE PERSONA', 'NOMBRE PROVEEDOR'];
     const todos = Array.from(document.querySelectorAll('div, section, article'));
@@ -296,7 +308,7 @@ async function exportarTabla(page) {
     };
 
     return buscar(claves, 300) || buscar(fallback, 300);
-  });
+  }), 10000, 'buscar tabla de detalle').catch(e => { console.log(`  ⚠️ ${e.message}`); return null; });
 
   const cx   = tablaRect ? tablaRect.x + Math.round(tablaRect.w / 2) : 800;
   const cyMid = tablaRect ? tablaRect.y + Math.round(tablaRect.h / 2) : 700;
@@ -317,7 +329,7 @@ async function exportarTabla(page) {
     for (let y = cyMid; y >= cyTop - 20; y -= 10) {
       await page.mouse.move(xTry, y);
       await sleep(120);
-      const res = await page.evaluate((sels) => {
+      const res = await conTimeout(page.evaluate((sels) => {
         for (const sel of sels) {
           for (const btn of document.querySelectorAll(sel)) {
             const r = btn.getBoundingClientRect();
@@ -328,7 +340,7 @@ async function exportarTabla(page) {
           }
         }
         return null;
-      }, selectoresMenu);
+      }, selectoresMenu), 5000, 'buscar botón de menú').catch(() => null);
       if (res) { console.log(`  ✅ Menú en (${res.x},${res.y})`); clickOk = true; break; }
     }
   }
@@ -337,7 +349,7 @@ async function exportarTabla(page) {
   await sleep(1200);
 
   // Click en "Exportar datos"
-  const exportado = await page.evaluate(() => {
+  const exportado = await conTimeout(page.evaluate(() => {
     for (const txt of ['Exportar datos', 'Export data']) {
       for (const sel of ['button.pbi-menu-item', '[role="menuitem"]', 'button']) {
         const item = Array.from(document.querySelectorAll(sel)).find(i => i.textContent.trim() === txt);
@@ -345,14 +357,15 @@ async function exportarTabla(page) {
       }
     }
     return null;
-  });
+  }), 8000, 'click "Exportar datos"').catch(() => null);
   if (!exportado) throw new Error('No se encontró "Exportar datos" en el menú');
   console.log(`  ✅ "${exportado}" clickeado`);
   await sleep(3000);
 
-  // Confirmar diálogo
+  // Confirmar diálogo (cada intento con su propio timeout — si Chrome se
+  // cuelga acá, antes se quedaba esperando para siempre en vez de fallar)
   for (let i = 0; i < 20; i++) {
-    const ok = await page.evaluate(() => {
+    const ok = await conTimeout(page.evaluate(() => {
       const btns = Array.from(document.querySelectorAll('button')).filter(b => {
         const r = b.getBoundingClientRect();
         return ['Exportar','Export'].includes(b.textContent.trim()) && r.width > 0;
@@ -360,7 +373,7 @@ async function exportarTabla(page) {
       if (btns.length === 0) return false;
       btns[btns.length - 1].click();
       return true;
-    });
+    }), 5000, 'confirmar diálogo de exportación').catch(() => false);
     if (ok) { console.log(`  ✅ Diálogo confirmado`); break; }
     if (i % 4 === 0) console.log(`  ⌛ Esperando diálogo... ${i+1}/20`);
     await sleep(500);
