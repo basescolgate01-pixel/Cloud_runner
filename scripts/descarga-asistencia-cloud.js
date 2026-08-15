@@ -144,119 +144,88 @@ async function manejarKMSI(page) {
 }
 
 // ─── SETEAR FECHA ─────────────────────────────────────────────────────────────
-async function buscarInputsFecha(page) {
-  // Reintentar hasta 10 veces con 3 segundos entre intentos (30s total)
-  for (let intento = 0; intento < 10; intento++) {
-    // Buscar en página principal
+// 100% via page.evaluate — sin page.$$(), sin ElementHandles, sin DOM.describeNode.
+// En Railway, cualquier llamada que pase por el protocolo CDP (page.$$, inp.click,
+// inp.type) puede colgarse cuando Chrome está bajo presión de CPU/memoria.
+// evaluate() corre directo en el motor JS del browser y no depende del protocolo.
+async function setearFecha(page, fecha) {
+  console.log(`  Seteando fecha: ${fecha}`);
+
+  // Hacer TODO en un solo evaluate: buscar inputs, ordenar por posición X,
+  // setear HASTA (derecha) y DESDE (izquierda).
+  const resultado = await conTimeout(page.evaluate((fecha) => {
     const selectores = [
       'input.date-slicer-input',
       'input[class*="date-slicer"]',
       'input[class*="dateSlicer"]',
       'input[type="text"][class*="slicer"]',
     ];
-    for (const sel of selectores) {
-      const inputs = await page.$$(sel);
-      if (inputs.length >= 2) {
-        console.log(`  ✅ Inputs encontrados en página (${sel}): ${inputs.length}`);
-        return { contexto: page, inputs };
+
+    function buscarInputs() {
+      for (const sel of selectores) {
+        const inputs = Array.from(document.querySelectorAll(sel));
+        if (inputs.length >= 2) return { sel, inputs };
       }
+      return null;
     }
 
-    // Buscar en iframes
-    for (const frame of page.frames()) {
-      try {
-        for (const sel of selectores) {
-          const fi = await frame.$$(sel);
-          if (fi.length >= 1) {
-            console.log(`  ✅ Inputs encontrados en frame (${sel}): ${fi.length}`);
-            return { contexto: frame, inputs: fi };
-          }
-        }
-      } catch (_) {}
+    function setearInput(el, val) {
+      el.focus();
+      el.click();
+      const ns = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+      ns.call(el, '');
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      ns.call(el, val);
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
+      el.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
+      el.blur();
+      return el.value;
     }
 
-    console.log(`  ⌛ Inputs no encontrados, reintento ${intento + 1}/10...`);
-    await sleep(3000);
-  }
-  return { contexto: page, inputs: [] };
-}
+    const found = buscarInputs();
+    if (!found) return { ok: false, error: 'No se encontraron inputs de fecha' };
 
-async function setearFecha(page, fecha) {
-  // `fecha` viene en formato M/D/YYYY desde getFechaFiltro() (ej: "6/2/2026").
-  // Tipeamos directamente en el input en lugar de navegar el calendario: el
-  // tipeo no depende del idioma de la UI (el reporte está en español) ni de
-  // dónde quede el foco del calendario, así que es confiable en headless.
-  //
-  // IMPORTANTE: Power BI re-renderiza el panel de filtros después de cada
-  // cambio de fecha, lo que deja los ElementHandle previos inválidos (stale).
-  // Por eso re-buscamos los inputs ANTES de cada campo individual.
-  console.log(`  Seteando fecha: ${fecha}`);
+    // Ordenar por posición X: idx 0 = DESDE (izq), idx 1 = HASTA (der)
+    const sorted = found.inputs
+      .map(el => ({ el, x: el.getBoundingClientRect().x }))
+      .sort((a, b) => a.x - b.x);
 
-  // Orden: HASTA primero (idx 1 por posición X), luego DESDE (idx 0)
-  const labelsOrden = ['HASTA', 'DESDE'];
+    const results = {};
 
-  for (const label of labelsOrden) {
-    console.log(`  → Buscando inputs para ${label}...`);
-
-    // Re-buscar los inputs frescos antes de cada campo (evita stale handles)
-    const { contexto, inputs } = await buscarInputsFecha(page);
-    if (inputs.length === 0) throw new Error('No se encontraron inputs de fecha');
-
-    const inputsConPos = [];
-    for (const inp of inputs) {
-      try {
-        const x = await contexto.evaluate(el => el.getBoundingClientRect().x, inp);
-        inputsConPos.push({ inp, x });
-      } catch (_) {}
+    // HASTA primero (idx 1)
+    if (sorted.length > 1) {
+      results.hasta = setearInput(sorted[1].el, fecha);
     }
-    if (inputsConPos.length === 0) throw new Error('Inputs inaccesibles (stale)');
-    inputsConPos.sort((a, b) => a.x - b.x);
 
-    // HASTA = índice 1 (derecha), DESDE = índice 0 (izquierda)
-    const idx = label === 'HASTA' ? Math.min(1, inputsConPos.length - 1) : 0;
-    const inp = inputsConPos[idx].inp;
+    // Pausa entre campos (Power BI re-renderiza)
+    // No podemos hacer sleep() dentro de evaluate, pero el re-render es síncrono
 
-    console.log(`  → Seteando ${label} a ${fecha}...`);
-    try {
-      // Todo via evaluate — sin inp.click(), inp.type(), keyboard.press()
-      // que se cuelgan en CPUs lentas de Railway.
-      await conTimeout(contexto.evaluate((el, val) => {
-        // Enfocar
-        el.focus();
-        el.click();
-
-        // Limpiar + setear valor con setter nativo (React/Angular lo detecta)
-        const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-        nativeSetter.call(el, '');
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-        nativeSetter.call(el, val);
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-        el.dispatchEvent(new Event('change', { bubbles: true }));
-
-        // Simular Enter para confirmar
-        el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
-        el.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
-
-        // Quitar foco para cerrar calendario
-        el.blur();
-      }, inp, fecha), 10000, `setear valor ${label}`);
-
-      // Esperar más después de HASTA para que Power BI re-renderice
-      const pausaPost = label === 'HASTA' ? 4000 : 2000;
-      await sleep(pausaPost);
-
-      const val = await conTimeout(
-        contexto.evaluate(el => el.value, inp),
-        5000, `leer valor ${label}`,
-      ).catch(() => '(timeout)');
-      console.log(`  ✅ ${label} = "${val}"`);
-    } catch (e) {
-      console.log(`  ⚠️ Error en ${label}: ${e.message}`);
-      await sleep(500);
+    // DESDE (idx 0) — re-buscar porque Power BI pudo re-renderizar los inputs
+    const found2 = buscarInputs();
+    if (found2) {
+      const sorted2 = found2.inputs
+        .map(el => ({ el, x: el.getBoundingClientRect().x }))
+        .sort((a, b) => a.x - b.x);
+      results.desde = setearInput(sorted2[0].el, fecha);
+    } else {
+      results.desde = '(inputs desaparecieron tras HASTA)';
     }
+
+    return { ok: true, sel: found.sel, count: found.inputs.length, ...results };
+  }, fecha), 20000, 'setearFecha completo');
+
+  if (!resultado?.ok) {
+    console.log(`  ⚠️ ${resultado?.error || 'Error desconocido seteando fechas'}`);
+  } else {
+    console.log(`  ✅ Inputs encontrados (${resultado.sel}): ${resultado.count}`);
+    console.log(`  ✅ HASTA = "${resultado.hasta}"`);
+    console.log(`  ✅ DESDE = "${resultado.desde}"`);
   }
 
-  await sleep(5000);
+  // Esperar a que Power BI aplique los filtros y re-renderice
+  await sleep(8000);
 }
 
 // ─── EXPORTAR TABLA ───────────────────────────────────────────────────────────
