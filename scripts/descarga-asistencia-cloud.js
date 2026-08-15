@@ -416,20 +416,44 @@ async function enviarEmail(archivoPath, fecha) {
 
   const filename = path.basename(archivoPath);
 
-  const transporter = nodemailer.createTransport({
-    service: 'gmail',
-    auth: { user: CONFIG.gmailUser, pass: CONFIG.gmailAppPass },
-  });
+  // Intentar con 3 configuraciones SMTP distintas (Railway puede bloquear
+  // ciertos puertos o protocolos según su infra del momento):
+  //   1. SMTP con STARTTLS en puerto 587 (el más compatible)
+  //   2. SMTPS directo en puerto 465
+  //   3. service: 'gmail' (auto-config de nodemailer)
+  const configs = [
+    { host: 'smtp.gmail.com', port: 587, secure: false, connectionTimeout: 15000, greetingTimeout: 10000 },
+    { host: 'smtp.gmail.com', port: 465, secure: true, connectionTimeout: 15000, greetingTimeout: 10000 },
+    { service: 'gmail', connectionTimeout: 15000, greetingTimeout: 10000 },
+  ];
 
-  await transporter.sendMail({
-    from: `"Asistencia Power BI" <${CONFIG.gmailUser}>`,
-    to: CONFIG.emailDestino,
-    subject: `Asistencia Google_CO ${fecha}`,
-    text: `Adjunto el reporte de asistencia del ${fecha}.`,
-    attachments: [{ filename, path: archivoPath }],
-  });
+  for (let i = 0; i < configs.length; i++) {
+    const cfg = configs[i];
+    const label = cfg.port ? `puerto ${cfg.port}` : 'service:gmail';
+    console.log(`  Intento ${i + 1}/3 (${label})...`);
 
-  console.log('  ✅ Email enviado');
+    try {
+      const transporter = nodemailer.createTransport({
+        ...cfg,
+        auth: { user: CONFIG.gmailUser, pass: CONFIG.gmailAppPass },
+      });
+
+      await transporter.sendMail({
+        from: `"Asistencia Power BI" <${CONFIG.gmailUser}>`,
+        to: CONFIG.emailDestino,
+        subject: `Asistencia Google_CO ${fecha}`,
+        text: `Adjunto el reporte de asistencia del ${fecha}.`,
+        attachments: [{ filename, path: archivoPath }],
+      });
+
+      console.log('  ✅ Email enviado');
+      return;
+    } catch (err) {
+      console.log(`  ⚠️ Falló (${label}): ${err.message}`);
+    }
+  }
+
+  throw new Error('No se pudo enviar email por ningún puerto SMTP');
 }
 
 // ─── LIMPIEZA AL DETENER ──────────────────────────────────────────────────────
