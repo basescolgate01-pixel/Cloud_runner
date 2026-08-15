@@ -12,6 +12,8 @@ const path = require('path');
 const fs = require('fs');
 const http = require('http');
 const https = require('https');
+const nodemailer = require('nodemailer');
+const { limpiarChromeHuerfano } = require('./_cleanup');
 
 // ─── CONFIGURACIÓN ────────────────────────────────────────────────────────────
 const CONFIG = {
@@ -28,11 +30,9 @@ const CONFIG = {
   // Email de destino
   emailDestino: process.env.EMAIL_DESTINO || 'mriquelme@ecrgroup.cl',
 
-  // Gmail remitente — OAuth2
-  gmailUser:          process.env.GMAIL_USER          || 'notificaciones.colgate@gmail.com',
-  gmailClientId:      process.env.GMAIL_CLIENT_ID     || '',
-  gmailClientSecret:  process.env.GMAIL_CLIENT_SECRET || '',
-  gmailRefreshToken:  process.env.GMAIL_REFRESH_TOKEN || '',
+  // Gmail remitente — App Password (nodemailer)
+  gmailUser:    process.env.GMAIL_USER     || 'notificaciones.colgate@gmail.com',
+  gmailAppPass: process.env.GMAIL_APP_PASS || '',
 
   // Puerto del servidor HTTP
   port: parseInt(process.env.PORT || '8080'),
@@ -71,10 +71,7 @@ function getFechaFiltro() {
 // ─── LOGIN POWER BI ───────────────────────────────────────────────────────────
 async function loginPowerBI(page) {
   console.log('  [1] Pantalla Power BI login...');
-  console.log(`  URL actual: ${page.url()}`);
-  const screenshotPath = process.env.RAILWAY_ENVIRONMENT ? '/data/debug-login.png' : '/tmp/debug-login.png';
-  await page.screenshot({ path: screenshotPath }).catch(() => {});
-  console.log(`  Screenshot guardado en ${screenshotPath}`);
+  console.log(`  URL actual: ${page.url().split('?')[0]}`);
 
   // Manejar pantalla "elegir cuenta" de Microsoft si aparece
   const pickAccount = await page.$('div[data-focuszone-id], div[class*="tile"]').catch(() => null);
@@ -261,11 +258,6 @@ async function setearFecha(page, fecha) {
     }
   }
 
-  try {
-    await page.screenshot({ path: path.join(CONFIG.downloadPath, 'debug-fecha.png') });
-    console.log('  📸 Screenshot guardado');
-  } catch (_) {}
-
   await sleep(5000);
 }
 
@@ -375,64 +367,24 @@ async function exportarTabla(page) {
   }
 }
 
-// ─── ENVIAR EMAIL (Gmail API + OAuth2) ───────────────────────────────────────
+// ─── ENVIAR EMAIL (nodemailer + Gmail App Password) ──────────────────────────
 async function enviarEmail(archivoPath, fecha) {
   console.log(`\n📧 Enviando email a ${CONFIG.emailDestino}...`);
 
-  // 1. Obtener access token
-  const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      client_id:     CONFIG.gmailClientId,
-      client_secret: CONFIG.gmailClientSecret,
-      refresh_token: CONFIG.gmailRefreshToken,
-      grant_type:    'refresh_token',
-    }),
+  const filename = path.basename(archivoPath);
+
+  const transporter = nodemailer.createTransport({
+    service: 'gmail',
+    auth: { user: CONFIG.gmailUser, pass: CONFIG.gmailAppPass },
   });
-  if (!tokenRes.ok) throw new Error(`Token error: ${await tokenRes.text()}`);
-  const { access_token } = await tokenRes.json();
 
-  // 2. Construir MIME manualmente
-  const boundary = 'boundary_' + Date.now();
-  const fileBytes = fs.readFileSync(archivoPath);
-  const fileB64   = fileBytes.toString('base64');
-  const filename  = path.basename(archivoPath);
-
-  const mime = [
-    `MIME-Version: 1.0`,
-    `From: "Asistencia Power BI" <${CONFIG.gmailUser}>`,
-    `To: ${CONFIG.emailDestino}`,
-    `Subject: Asistencia Google_CO ${fecha}`,
-    `Content-Type: multipart/mixed; boundary="${boundary}"`,
-    ``,
-    `--${boundary}`,
-    `Content-Type: text/plain; charset="utf-8"`,
-    ``,
-    `Adjunto el reporte de asistencia del ${fecha}.`,
-    ``,
-    `--${boundary}`,
-    `Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`,
-    `Content-Transfer-Encoding: base64`,
-    `Content-Disposition: attachment; filename="${filename}"`,
-    ``,
-    fileB64,
-    `--${boundary}--`,
-  ].join('\r\n');
-
-  const raw = Buffer.from(mime).toString('base64')
-    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-
-  // 3. Enviar via Gmail API
-  const sendRes = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${access_token}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ raw }),
+  await transporter.sendMail({
+    from: `"Asistencia Power BI" <${CONFIG.gmailUser}>`,
+    to: CONFIG.emailDestino,
+    subject: `Asistencia Google_CO ${fecha}`,
+    text: `Adjunto el reporte de asistencia del ${fecha}.`,
+    attachments: [{ filename, path: archivoPath }],
   });
-  if (!sendRes.ok) throw new Error(`Gmail API error: ${await sendRes.text()}`);
 
   console.log('  ✅ Email enviado');
 }
@@ -466,6 +418,9 @@ async function descargarAsistencia() {
     fs.mkdirSync(CONFIG.downloadPath, { recursive: true });
   }
 
+  // Por si quedó un Chrome zombie de una corrida anterior que crasheó
+  limpiarChromeHuerfano();
+
   const archivosAntes = new Set(fs.readdirSync(CONFIG.downloadPath));
   let browser;
 
@@ -480,7 +435,6 @@ async function descargarAsistencia() {
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
         '--disable-gpu',
-        '--no-zygote',
         '--window-size=1920,1080',
         '--disable-blink-features=AutomationControlled',
         '--lang=es-CL',
@@ -532,7 +486,7 @@ async function descargarAsistencia() {
     await page.goto(CONFIG.powerBiUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
     await sleep(3000);
     let url = page.url();
-    console.log(`  URL inicial: ${url}`);
+    console.log(`  URL inicial: ${url.split('?')[0]}`);
 
     // Si está en singleSignOn, completar el formulario de email de Power BI
     if (url.includes('singleSignOn')) {
@@ -567,7 +521,7 @@ async function descargarAsistencia() {
         { timeout: 30000 }
       );
       url = page.url();
-      console.log(`  URL tras singleSignOn: ${url}`);
+      console.log(`  URL tras singleSignOn: ${url.split('?')[0]}`);
     }
 
     // Login Microsoft
@@ -604,7 +558,7 @@ async function descargarAsistencia() {
       { timeout: 120000 }
     );
     url = page.url();
-    console.log(`  URL reporte: ${url}`);
+    console.log(`  URL reporte: ${url.split('?')[0]}`);
     await sleep(25000); // Power BI tarda más en renderizar en headless (25s para notebooks lentos)
     console.log('✅ Reporte cargado');
 

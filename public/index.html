@@ -28,6 +28,9 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 .hdr-title { font-weight: 700; font-size: 15px; }
 .hdr-tag { font-size: 10px; font-weight: 700; letter-spacing: .5px; padding: 3px 9px; border-radius: 20px; background: var(--accent); color: #fff; }
 .hdr-clock { margin-left: auto; font-size: 12px; color: var(--text2); font-family: monospace; font-variant-numeric: tabular-nums; }
+.btn-cleanup { margin-left: auto; font-size: 11px; font-weight: 600; padding: 5px 12px; border-radius: 6px; border: 1px solid var(--border); background: var(--s2); color: var(--text2); cursor: pointer; }
+.btn-cleanup:hover { background: var(--s3); color: var(--text); }
+.btn-cleanup:disabled { opacity: .5; cursor: default; }
 
 .app { display: flex; flex: 1; overflow: hidden; min-width: 0; }
 
@@ -220,6 +223,7 @@ textarea.form-input { min-height: 60px; resize: vertical; }
   <span class="hdr-logo">☁️</span>
   <span class="hdr-title">Cloud Runner</span>
   <span class="hdr-tag">PRO</span>
+  <button class="btn-cleanup" id="btn-cleanup" onclick="limpiarCache()" title="Mata procesos de Chrome colgados de crashes anteriores">🧹 Limpiar caché</button>
   <span class="hdr-clock" id="clock">--:--:--</span>
 </header>
 
@@ -747,6 +751,17 @@ async function stopRun(id) {
     else toast('Ejecución detenida', 'ok');
   } catch { toast('Error al detener', 'err'); }
   finally { if(btn) { btn.disabled=false; btn.textContent='⏹ Detener'; } }
+}
+
+async function limpiarCache() {
+  const btn = document.getElementById('btn-cleanup');
+  if (btn) { btn.disabled = true; btn.textContent = '🧹 Limpiando...'; }
+  try {
+    const r = await fetch('/api/system/cleanup', { method:'POST' });
+    const d = await r.json();
+    toast(d.detalle || 'Procesos limpiados', 'ok');
+  } catch { toast('Error al limpiar procesos', 'err'); }
+  finally { if(btn) { btn.disabled=false; btn.textContent='🧹 Limpiar caché'; } }
 }
 
 // ── Elapsed ───────────────────────────────────────────────────────────────────

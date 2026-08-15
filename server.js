@@ -3,7 +3,7 @@ const express    = require('express');
 const cron       = require('node-cron');
 const multer     = require('multer');
 const nodemailer = require('nodemailer');
-const { spawn }  = require('child_process');
+const { spawn, exec } = require('child_process');
 const path       = require('path');
 const fs         = require('fs');
 
@@ -191,11 +191,40 @@ function fmtDur(secs) {
   return `${Math.floor(secs / 60)}m ${secs % 60}s`;
 }
 
+// ── Limpieza de procesos Chrome/Chromium huérfanos ─────────────────────────────
+// Cuando un job con Puppeteer crashea, a veces el proceso de Chrome queda vivo
+// (zombie) consumiendo RAM.
+//
+// ⚠️ En Windows, Puppeteer lanza procesos llamados "chrome.exe" — el MISMO
+// nombre que el Chrome normal que usa el usuario. Matar por nombre solo
+// (`taskkill /IM chrome.exe`) cierra TODO Chrome abierto en la PC, ventanas
+// del usuario incluidas. Por eso filtramos por "--headless" en la línea de
+// comando: esa flag solo la llevan los procesos que lanza Puppeteer.
+function limpiarProcesosHuerfanos() {
+  return new Promise((resolve) => {
+    const esWindows = process.platform === 'win32';
+    const cmd = esWindows
+      ? `powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'chrome\\.exe|headless_shell\\.exe' -and $_.CommandLine -match '--headless' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"`
+      : 'pkill -9 -f "chrome.*--headless|chromium.*--headless|headless_shell" ; true';
+
+    exec(cmd, { windowsHide: true }, (err, stdout, stderr) => {
+      // Que no encuentre nada para matar no es una falla real.
+      resolve({ ok: true, detalle: (stdout || stderr || 'Sin procesos colgados de Puppeteer').trim() });
+    });
+  });
+}
+
 // Init
 loadJobs();
 Object.values(state).forEach(scheduleJob);
 
 // ── API ───────────────────────────────────────────────────────────────────────
+app.post('/api/system/cleanup', async (_, res) => {
+  const resultado = await limpiarProcesosHuerfanos();
+  console.log(`  🧹 Limpieza de procesos: ${resultado.detalle}`);
+  res.json(resultado);
+});
+
 app.get('/api/jobs', (_, res) =>
   res.json(Object.values(state).map(j => ({
     id: j.id, name: j.name, description: j.description,

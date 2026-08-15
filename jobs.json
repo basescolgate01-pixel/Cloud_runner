@@ -22,5 +22,17 @@
       "on": "never",
       "email": ""
     }
+  },
+  {
+    "id": "api-proyectos-clouderunner-1786741653954",
+    "name": "APi Proyectos   cloudeRunner",
+    "description": "",
+    "script": "./scripts/APi Proyectos - cloudeRunner.js",
+    "cron": "",
+    "enabled": true,
+    "notify": {
+      "on": "never",
+      "email": ""
+    }
   }
 ]
